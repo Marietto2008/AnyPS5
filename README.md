@@ -2,9 +2,9 @@
 
 # About
 
-Tool for automatic executables porting to Linux and Windows.
+Tool for automatic executables porting to FreeBSD.
 
-The relinker-only build runs on macOS, including Apple silicon.
+The relinker-only build runs on FreeBSD.
 
 [**Web converter**](https://boykopovar.github.io/AnyPS5/) - files stay on your device.
 
