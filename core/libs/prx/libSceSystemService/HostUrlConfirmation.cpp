@@ -8,7 +8,7 @@ constexpr std::size_t WRAP_WIDTH = 96;
 constexpr int BUTTON_CANCEL = 0;
 constexpr int BUTTON_OPEN = 1;
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__FreeBSD__) // X11/Wayland desktops
 bool IsSet(const char* name) {
     const char* value = std::getenv(name);
     return value != nullptr && value[0] != '\0';
@@ -28,7 +28,7 @@ std::string HostConfirmationText(const std::string& url) {
 }
 
 bool HostMessageBoxConfirmation::Confirm(const std::string& url) {
-#ifdef __linux__
+#if defined(__linux__) || defined(__FreeBSD__) // X11/Wayland desktops
     if (!IsSet("DISPLAY") && !IsSet("WAYLAND_DISPLAY")) return false;
 #endif
     const std::string text = HostConfirmationText(url);

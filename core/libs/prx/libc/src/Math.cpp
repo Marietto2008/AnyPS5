@@ -195,6 +195,27 @@
 
 namespace {
 
+// A guest call answered by the host libm. FreeBSD's reports errors only in the floating-point flags (math_errhandling
+// is MATH_ERREXCEPT); the guest's also sets errno, as glibc's does: EDOM for an invalid operation, ERANGE for a pole,
+// an overflow or an underflow to zero.
+template <typename T, typename Call>
+T HostMath(T x, Call call) {
+#if defined(__FreeBSD__)
+    std::fexcept_t before;
+    std::fegetexceptflag(&before, FE_ALL_EXCEPT);
+    std::feclearexcept(FE_ALL_EXCEPT);
+    const T result = call(x);
+    const int raised = std::fetestexcept(FE_ALL_EXCEPT);
+    std::fesetexceptflag(&before, FE_ALL_EXCEPT);
+    std::feraiseexcept(raised);
+    if ((raised & FE_INVALID) != 0 && !std::isnan(x)) errno = EDOM;
+    else if ((raised & (FE_DIVBYZERO | FE_OVERFLOW)) != 0 || ((raised & FE_UNDERFLOW) != 0 && result == 0)) errno = ERANGE;
+    return result;
+#else
+    return call(x);
+#endif
+}
+
 template<typename TFloat>
 std::int64_t RoundToInt64(TFloat value) {
     const TFloat rounded = std::round(value);
@@ -284,6 +305,19 @@ float SinhfExp(float x) {
     return y * std::bit_cast<float>(static_cast<std::uint32_t>(0x7f + k) << 23);
 }
 
+#if defined(__FreeBSD__)
+// FreeBSD's tgamma answers every x above its overflow threshold with a division by zero; the guest's, like glibc's,
+// overflows up to 171.63.
+bool HostTgammaDividesByZero(double x) {
+    return std::isgreater(x, 171.624376956302725) && !std::isgreater(x, 171.63);
+}
+
+double TgammaOverflow() {
+    static volatile double huge = 0x1p1023;
+    return huge * huge;
+}
+#endif
+
 float GuestTgammaf(float x) {
     if (std::isgreater(static_cast<double>(x), 171.63)) {
         static volatile double zero = 0.0;
@@ -293,6 +327,10 @@ float GuestTgammaf(float x) {
         const double interval = std::floor(-static_cast<double>(x));
         return std::fmod(interval, 2.0) == 0.0 ? -0.0f : 0.0f;
     }
+#if defined(__FreeBSD__)
+    if (std::isnan(x)) return x + x; // FreeBSD's tgamma compares a quiet NaN and raises invalid
+    if (HostTgammaDividesByZero(static_cast<double>(x))) return static_cast<float>(TgammaOverflow());
+#endif
     const int savedErrno = errno;
     const float result = static_cast<float>(std::tgamma(static_cast<double>(x)));
     errno = std::isfinite(x) && x < 0.0f && std::trunc(x) == x ? EDOM : savedErrno;
@@ -1368,8 +1406,8 @@ double APS5_VABI acos_nid_postfix(double x) {
     const double w = AsinRational(z) * s + c;
     return 2.0 * (df + w);
 }
-double APS5_VABI sqrt_nid_postfix(double x) { return std::sqrt(x); }
-float APS5_VABI sqrtf_nid_postfix(float x) { return std::sqrt(x); }
+double APS5_VABI sqrt_nid_postfix(double x) { return HostMath(x, [](double v) { return std::sqrt(v); }); }
+float APS5_VABI sqrtf_nid_postfix(float x) { return HostMath(x, [](float v) { return std::sqrt(v); }); }
 double APS5_VABI fabs_nid_postfix(double x) { return std::fabs(x); }
 float APS5_VABI fabsf_nid_postfix(float x) { return std::fabs(x); }
 long double APS5_VABI fabsl_nid_postfix(long double x) { return std::fabs(x); }
@@ -1571,10 +1609,14 @@ long double APS5_VABI log1pl_nid_postfix(long double x) {
     return _LLog_nid_postfix(u, 0) + correction;
 }
 long double APS5_VABI log2l_nid_postfix(long double x) { return _LLog_nid_postfix(x, -1); }
-long double APS5_VABI lgammal_nid_postfix(long double x) { return std::lgamma(x); }
-long double APS5_VABI tgammal_nid_postfix(long double x) { return std::tgamma(x); }
+long double APS5_VABI lgammal_nid_postfix(long double x) { return HostMath(x, [](long double v) { return std::lgamma(v); }); }
+long double APS5_VABI tgammal_nid_postfix(long double x) { return HostMath(x, [](long double v) { return std::tgamma(v); }); }
 float APS5_VABI tgammaf_nid_postfix(float x) { return GuestTgammaf(x); }
 double APS5_VABI tgamma_nid_postfix(double x) {
+#if defined(__FreeBSD__)
+    if (std::isnan(x)) return x + x; // FreeBSD's tgamma compares a quiet NaN and raises invalid
+    if (HostTgammaDividesByZero(x)) return TgammaOverflow();
+#endif
     const int savedErrno = errno;
     const double result = std::tgamma(x);
     errno = std::isfinite(x) && x < 0.0 && std::trunc(x) == x ? EDOM : savedErrno;
@@ -1988,7 +2030,7 @@ double APS5_VABI log1p_nid_postfix(double x) {
     }
     return k * ln2_hi - ((hfsq - (s * (hfsq + R) + (k * ln2_lo + c))) - f);
 }
-float APS5_VABI log1pf_nid_postfix(float x) { return std::log1p(x); }
+float APS5_VABI log1pf_nid_postfix(float x) { return HostMath(x, [](float v) { return std::log1p(v); }); }
 static double Expm1(double x) {
     const double tiny = 1.0e-300;
     const double o_threshold = 7.09782712893383973096e+02;
@@ -2299,7 +2341,7 @@ double APS5_VABI erfc_nid_postfix(double x) {
     const double r = ErfTail(magnitude, ix < 0x4006db6d);
     return hx > 0 ? r / magnitude : 2.0 - r / magnitude;
 }
-float APS5_VABI erfcf_nid_postfix(float x) { return std::erfc(x); }
+float APS5_VABI erfcf_nid_postfix(float x) { return HostMath(x, [](float v) { return std::erfc(v); }); }
 int signgam_nid_postfix = 0;
 
 static double LgammaMsun(double x);
@@ -4446,7 +4488,7 @@ double APS5_VABI __powidf2_nid_postfix(double base, int exponent) {
     }
     return reciprocal ? 1.0 / result : result;
 }
-float APS5_VABI expf_nid_postfix(float x) { return std::exp(x); }
+float APS5_VABI expf_nid_postfix(float x) { return HostMath(x, [](float v) { return std::exp(v); }); }
 float APS5_VABI logf_nid_postfix(float x) {
     const float ln2_hi = static_cast<float>(6.9313812256e-01);
     const float ln2_lo = static_cast<float>(9.0580006145e-06);

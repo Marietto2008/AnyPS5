@@ -8,7 +8,7 @@ configure_windows_unwind(libcairo)
 target_sources(libcairo PRIVATE SurfacePattern.cpp)
 target_sources(libcairo PRIVATE GlyphDrawing.cpp)
 target_sources(libcairo PRIVATE ContextFontOptions.cpp)
-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
     target_link_options(libcairo PRIVATE LINKER:--exclude-libs,ALL)
 elseif(APPLE)
     target_link_options(libcairo PRIVATE

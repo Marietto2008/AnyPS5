@@ -317,7 +317,7 @@ public:
         while (!__atomic_compare_exchange_n(&_guest.flags, &old, next, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
     }
     void DropFailedUnbufferedWrite() {
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__) // BSD stdio keeps the bytes of a failed unbuffered write for the next one
         if (_handle && (GetHandle()->_flags & __SNBF) != 0) ::fpurge(GetHandle());
 #endif
     }

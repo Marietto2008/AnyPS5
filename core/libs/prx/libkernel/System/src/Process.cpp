@@ -23,6 +23,9 @@
 #include <asm/prctl.h>
 #include <sys/syscall.h>
 #endif
+#if defined(__FreeBSD__) && defined(__x86_64__)
+#include <machine/sysarch.h>
+#endif
 
 #ifdef _WIN32
 #include "prx/libc/include/ChildProcesses.hpp"
@@ -69,6 +72,17 @@
 #endif
 
 extern char** environ;
+#if defined(__FreeBSD__)
+// On FreeBSD environ and __progname are defined by crt1.o, not by libc.so.7, which only references them. A relinked
+// PS5 executable has no crt1, so libc.so.7 would fail to load with "Undefined symbol environ". libkernel.prx, which
+// every relinked executable loads at startup, defines them; rtld finds them among the startup objects and fills them
+// in before any initializer runs (set_program_var in rtld.c). In an ordinary executable crt1's definitions come first
+// in the lookup and these stay unused. The _nid_no_patch_cut suffix makes nid_patcher export the plain names.
+extern "C" {
+__attribute__((visibility("default"), used)) char** environ_nid_no_patch_cut = nullptr;
+__attribute__((visibility("default"), used)) const char* __progname_nid_no_patch_cut = "";
+}
+#endif
 namespace {
 
 constexpr int sceInvalidArgument = static_cast<int>(0x80020016u);
@@ -116,6 +130,9 @@ bool StoreGuestId(std::uint32_t* output) {
     const auto copied = ::process_vm_writev(::getpid(), &local, 1, &remote, 1, 0);
     if (copied < 0 && errno == EFAULT) errno = saved;
     return copied == static_cast<ssize_t>(sizeof(zero));
+#elif defined(__FreeBSD__)
+    // No process_vm_writev on FreeBSD: libc's checked copy.
+    return GuestCopyOut_nid_no_patch(output, &zero, sizeof(zero));
 #elif defined(__APPLE__)
     return ::mach_vm_write(::mach_task_self(), reinterpret_cast<mach_vm_address_t>(output),
         reinterpret_cast<vm_offset_t>(const_cast<std::uint32_t*>(&zero)), sizeof(zero)) == KERN_SUCCESS;
@@ -145,6 +162,9 @@ bool ReadGuest(void* destination, const void* source, std::size_t bytes) {
     if (copied < 0 && errno != EFAULT) throw std::runtime_error("credentials: process_vm_readv failed with errno " + std::to_string(errno));
     errno = saved;
     return copied >= 0 && static_cast<std::size_t>(copied) == bytes;
+#elif defined(__FreeBSD__)
+    // No process_vm_readv on FreeBSD: libc's checked copy (the host read was prepared above).
+    return GuestCopyInUnsynced_nid_no_patch(destination, source, bytes);
 #elif defined(__APPLE__)
     mach_vm_size_t copied = 0;
     return ::mach_vm_read_overwrite(::mach_task_self(), reinterpret_cast<mach_vm_address_t>(source), bytes,
@@ -170,6 +190,9 @@ bool WriteGuest(void* destination, const void* source, std::size_t bytes) {
     if (copied < 0 && errno != EFAULT) throw std::runtime_error("credentials: process_vm_writev failed with errno " + std::to_string(errno));
     errno = saved;
     return copied >= 0 && static_cast<std::size_t>(copied) == bytes;
+#elif defined(__FreeBSD__)
+    // No process_vm_writev on FreeBSD: libc's checked copy.
+    return GuestCopyOut_nid_no_patch(destination, source, bytes);
 #elif defined(__APPLE__)
     return ::mach_vm_write(::mach_task_self(), reinterpret_cast<mach_vm_address_t>(destination),
         reinterpret_cast<vm_offset_t>(source), static_cast<mach_msg_type_number_t>(bytes)) == KERN_SUCCESS;
@@ -217,6 +240,8 @@ public:
         char** values = *_NSGetArgv();
         for (int index = 0; index < count; ++index)
             arguments.push_back(values[index]);
+#elif defined(__FreeBSD__)
+        arguments = HostExecutable::Arguments("Reading process arguments");
 #else
         std::ifstream stream("/proc/self/cmdline", std::ios::binary);
         if (!stream)
@@ -756,7 +781,7 @@ int WaitProcess_nid_no_patch(int pid, int* status, int options, GuestResourceUsa
     } else if (WIFSIGNALED(encoded) || WIFSTOPPED(encoded)) {
         const int hostSignal = WIFSIGNALED(encoded) ? WTERMSIG(encoded) : WSTOPSIG(encoded);
         int guestSignal = hostSignal;
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(__FreeBSD__) // Linux numbering; the BSD hosts share the guest's
         switch (hostSignal) {
         case 7: guestSignal = 10; break;
         case 10: guestSignal = 30; break;
@@ -858,13 +883,18 @@ int ExecProgram(const char* file, char* const* arguments, char* const* environme
 #ifdef _WIN32
     if (!ExecWindowsImage(target)) return fail(errnoNoExec);
     ExecReplaceWindows(target, ExecArgumentVector(arguments), implicitEnvironment, entries);
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__FreeBSD__)
+#if defined(__FreeBSD__)
+    constexpr unsigned char hostOsAbi = 9;   // ELFOSABI_FREEBSD, what relinker --freebsd writes
+#else
+    constexpr unsigned char hostOsAbi = 3;   // ELFOSABI_GNU
+#endif
     const int descriptor = ::open(target.c_str(), O_RDONLY | O_CLOEXEC);
     if (descriptor < 0) throw std::system_error(errno, std::generic_category(), "exec: opening the converted executable");
     std::array<unsigned char, 20> header{};
     if (::pread(descriptor, header.data(), header.size(), 0) != static_cast<ssize_t>(header.size()) || header[0] != 0x7f ||
         header[1] != 'E' || header[2] != 'L' || header[3] != 'F' || header[4] != 2 || header[5] != 1 ||
-        (header[7] != 0 && header[7] != 3) || header[17] != 0 || (header[16] != 2 && header[16] != 3) || header[18] != 62 ||
+        (header[7] != 0 && header[7] != hostOsAbi) || header[17] != 0 || (header[16] != 2 && header[16] != 3) || header[18] != 62 ||
         header[19] != 0) {
         ::close(descriptor);
         return fail(errnoNoExec);
@@ -1032,7 +1062,9 @@ static int IoPermission(int operation, void* parameters) {
     return 0;
 }
 
-int APS5_VABI sysarch(int operation, void* parameters) {
+// _nid_postfix: FreeBSD's libc has its own sysarch(2), which a plain-named PS5 one would interpose for the whole
+// process wherever the libraries are loaded unpatched. nid_patcher strips the postfix, so the NID is unchanged.
+int APS5_VABI sysarch_nid_postfix(int operation, void* parameters) {
     constexpr int i386GetLdt = 0;
     constexpr int i386SetLdt = 1;
     constexpr int i386GetIoperm = 3;
@@ -1059,7 +1091,7 @@ int APS5_VABI sysarch(int operation, void* parameters) {
     const bool i386 = operation == i386GetFsBase || operation == i386GetGsBase;
     if (!i386 && operation != getFsBase && operation != getGsBase && operation != setGsBase && operation != i386SetGsBase)
         NotImplemented_nid_no_patch(("sysarch: operation " + std::to_string(operation)).c_str());
-#if (defined(__linux__) || defined(_WIN32) || defined(__APPLE__)) && defined(__x86_64__)
+#if (defined(__linux__) || defined(__FreeBSD__) || defined(_WIN32) || defined(__APPLE__)) && defined(__x86_64__)
     if (parameters == nullptr) {
         *__error_nid_postfix() = guestFault;
         return -1;
@@ -1079,6 +1111,9 @@ int APS5_VABI sysarch(int operation, void* parameters) {
         }
 #if defined(_WIN32) || defined(__APPLE__)
         GuestGsSet_nid_no_patch(base);
+#elif defined(__FreeBSD__)
+        // FreeBSD's own sysarch(2): GS is free for user code, as on Linux (libthr keeps TLS in FS).
+        if (::amd64_set_gsbase(reinterpret_cast<void*>(base)) != 0) throw std::system_error(errno, std::generic_category(), "sysarch: setting the GS base");
 #else
         if (::syscall(SYS_arch_prctl, ARCH_SET_GS, base) != 0) throw std::system_error(errno, std::generic_category(), "sysarch: setting the GS base");
 #endif
@@ -1088,6 +1123,11 @@ int APS5_VABI sysarch(int operation, void* parameters) {
 #if defined(_WIN32) || defined(__APPLE__)
     if (fs) NotImplemented_nid_no_patch(("sysarch: operation " + std::to_string(operation)).c_str());
     base = GuestGsGet_nid_no_patch();
+#elif defined(__FreeBSD__)
+    void* segment = nullptr;
+    if ((fs ? ::amd64_get_fsbase(&segment) : ::amd64_get_gsbase(&segment)) != 0)
+        throw std::system_error(errno, std::generic_category(), "sysarch: reading a segment base");
+    base = reinterpret_cast<std::uint64_t>(segment);
 #else
     if (::syscall(SYS_arch_prctl, fs ? ARCH_GET_FS : ARCH_GET_GS, &base) != 0)
         throw std::system_error(errno, std::generic_category(), "sysarch: reading a segment base");

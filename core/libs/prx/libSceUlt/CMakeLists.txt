@@ -12,7 +12,12 @@ if(BUILD_TESTING)
         target_compile_definitions(guest_ult_thread_lifecycle_tests PRIVATE ULT_LIFECYCLE_INTERPOSE=1)
         target_link_options(guest_ult_thread_lifecycle_tests PRIVATE
             LINKER:--wrap=pthread_mutex_lock LINKER:--wrap=pthread_mutex_unlock LINKER:--wrap=__pthread_cleanup_push_imp_nid_postfix)
-        list(APPEND ultLifecycleCases publication generation cleanup-setup)
+        list(APPEND ultLifecycleCases cleanup-setup)
+        # publication and generation pause inside std::mutex::lock through --wrap=pthread_mutex_lock, which only reaches
+        # a lock inlined into the test (libstdc++); FreeBSD's libc++, like Apple's, locks inside the shared library.
+        if(NOT CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+            list(APPEND ultLifecycleCases publication generation)
+        endif()
     endif()
     foreach(testCase IN LISTS ultLifecycleCases)
         add_test(NAME guest_ult_thread_lifecycle_${testCase} COMMAND guest_ult_thread_lifecycle_tests ${testCase})

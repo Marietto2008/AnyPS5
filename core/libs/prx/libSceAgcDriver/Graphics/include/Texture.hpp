@@ -214,7 +214,16 @@ public:
     };
 
     void assign(std::size_t size, bool flag) {
-        words.assign((size + WordBits - 1u) / WordBits, flag ? ~std::uint64_t{0} : 0u);
+        const std::size_t wordCount = (size + WordBits - 1u) / WordBits;
+        const std::uint64_t fill = flag ? ~std::uint64_t{0} : 0u;
+        if (wordCount > words.capacity()) {
+            // libc++'s vector::assign frees the old words before it allocates the new ones: a vector built aside and
+            // swapped in keeps them, and the count, through an allocation failure.
+            decltype(words) grown(wordCount, fill);
+            words.swap(grown);
+        } else {
+            words.assign(wordCount, fill);
+        }
         if (flag && size % WordBits != 0u) words.back() &= (std::uint64_t{1} << (size % WordBits)) - 1u;
         count = size;
     }

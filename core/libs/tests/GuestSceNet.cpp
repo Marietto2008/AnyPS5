@@ -44,7 +44,9 @@ extern const std::uint8_t in6addr_any_nid_postfix[16];
 extern const std::uint8_t in6addr_loopback_nid_postfix[16];
 
 extern const std::uint32_t sce_net_in6addr_any[4];
-extern const std::uint8_t sce_net_in6addr_linklocal_allnodes[16];
+// Aligned as defined (4, as the PS5 symbol): without it the x86-64 rule for 16-byte global arrays lets the compiler
+// assume 16 and compare with an aligned SSE load, which faults where a copy relocation places it at 4.
+alignas(std::uint32_t) extern const std::uint8_t sce_net_in6addr_linklocal_allnodes[16];
 
 std::uint64_t NetCtlReadByteCounter_nid_no_patch(const char*);
 

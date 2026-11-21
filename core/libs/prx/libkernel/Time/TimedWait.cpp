@@ -602,7 +602,11 @@ bool SingleWaiterCondition::waitSignal(const std::uint64_t* deadlineNanos) {
     timespec deadline{};
     if (deadlineNanos != nullptr) deadline = {static_cast<time_t>(*deadlineNanos / 1000000000ULL), static_cast<long>(*deadlineNanos % 1000000000ULL)};
     for (;;) {
+#if defined(__FreeBSD__)
+        const int result = deadlineNanos == nullptr ? sem_wait(&semaphore) : sem_clockwait_np(&semaphore, CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, nullptr);
+#else
         const int result = deadlineNanos == nullptr ? sem_wait(&semaphore) : sem_clockwait(&semaphore, CLOCK_MONOTONIC, &deadline);
+#endif
         if (result == 0) return true;
         if (errno == ETIMEDOUT) return false;
         if (errno != EINTR) throw std::system_error(errno, std::generic_category(), "TimedWait: cannot wait for a wait semaphore");

@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <cerrno>
 #include <cstdlib>
 #include <memory>
@@ -125,8 +126,42 @@ bool HasNarrowCharacterScan(const char* format) {
     return false;
 }
 
+#if defined(__FreeBSD__)
+// FreeBSD's scanf reads %i and float fields unlike the guest's: C23's 0b prefix, a float field backed off to its last
+// complete prefix, float fields cut at 512 bytes. Formats with them go through the in-process scanner, which has no
+// positional arguments.
+bool HostScanDiffers(const char* format) {
+    if (format == nullptr) return false;
+    bool differs = false;
+    while ((format = std::strchr(format, '%')) != nullptr) {
+        ++format;
+        if (*format == '%') { ++format; continue; }
+        if (*format == '*') ++format;
+        while (std::isdigit(static_cast<unsigned char>(*format))) ++format;
+        if (*format == '$') return false;
+        while (*format && std::strchr("hljztL", *format)) ++format;
+        if (*format != '\0' && std::strchr("iaAeEfFgG", *format) != nullptr) differs = true;
+        if (*format == '[') {
+            ++format;
+            if (*format == '^') ++format;
+            if (*format == ']') ++format;
+            while (*format && *format != ']') ++format;
+        }
+        if (*format) ++format;
+    }
+    return differs;
+}
+#endif
+
+bool ScansStreamInProcess(const char* format) {
+#if defined(__FreeBSD__)
+    if (HostScanDiffers(format)) return true;
+#endif
+    return HasGuestWideScan(format);
+}
+
 bool ScansInProcess(const char* format) {
-    return HasGuestWideScan(format) || HasNarrowCharacterScan(format);
+    return ScansStreamInProcess(format) || HasNarrowCharacterScan(format);
 }
 
 const char* CutAtQuadScanDirective(const char* format, std::string& head) {
@@ -319,10 +354,68 @@ public:
     void Advance(std::ptrdiff_t count) { consumed += count; }
     std::ptrdiff_t Consumed() const { return consumed; }
 
+#if defined(__FreeBSD__)
+    // Up to count bytes ahead, left unread: FreeBSD's ungetc takes back more than one byte.
+    std::string Lookahead(std::size_t count) const {
+        std::string ahead;
+        while (ahead.size() < count) {
+            const int next = std::fgetc(file);
+            if (next == EOF) break;
+            ahead.push_back(static_cast<char>(next));
+        }
+        for (auto byte = ahead.rbegin(); byte != ahead.rend(); ++byte)
+            if (std::ungetc(static_cast<unsigned char>(*byte), file) == EOF) throw std::runtime_error("float scan lookahead pushback failed");
+        return ahead;
+    }
+#endif
+
     int Scan(const char* directive, bool suppress, void* target, int* count) const {
         return suppress ? HostFscanf(file, directive, count) : HostFscanf(file, directive, target, count);
     }
 };
+
+#if defined(__FreeBSD__)
+// FreeBSD's scanf reads at most 512 bytes of a float field and leaves the rest unread; the guest reads the whole
+// field. Converts the field again as strtod would, stores the value as the host directive would have, and returns the
+// field's length.
+int LongFloatField(const char* text, unsigned long width, const std::string& length, void* target) {
+    const std::size_t available = std::strlen(text);
+    const std::string field(text, width == 0 ? available : std::min<std::size_t>(width, available));
+    char* end = nullptr;
+    const int savedError = errno;
+    if (length == "L") {
+        const long double value = std::strtold(field.c_str(), &end);
+        if (target != nullptr) std::memcpy(target, &value, sizeof(value));
+    } else if (length == "l") {
+        const double value = std::strtod(field.c_str(), &end);
+        if (target != nullptr) std::memcpy(target, &value, sizeof(value));
+    } else {
+        const float value = std::strtof(field.c_str(), &end);
+        if (target != nullptr) std::memcpy(target, &value, sizeof(value));
+    }
+    errno = savedError;
+    return static_cast<int>(end - field.c_str());
+}
+
+// FreeBSD's fscanf backs a float field off to its last complete prefix ("0x" scans as 0 and leaves "x", "infi" as inf
+// and leaves "i"); the guest reads such a field to its end and fails the match. Returns the length of the field that
+// fails, or 0 when the host's reading stands.
+std::size_t IncompleteFloatField(const std::string& field, unsigned long width) {
+    const std::size_t limit = std::min<std::size_t>(field.size(), width == 0 ? field.size() : width);
+    const std::size_t index = limit != 0 && (field[0] == '+' || field[0] == '-') ? 1 : 0;
+    if (index + 2 <= limit && field[index] == '0' && (field[index + 1] == 'x' || field[index + 1] == 'X')) {
+        const std::size_t after = index + 2;
+        const bool continues = after < limit && (std::isxdigit(static_cast<unsigned char>(field[after])) != 0 || field[after] == '.');
+        return continues ? 0 : after;
+    }
+    constexpr std::string_view infinity = "infinity";
+    std::size_t matched = 0;
+    while (index + matched < limit && matched < infinity.size() &&
+           std::tolower(static_cast<unsigned char>(field[index + matched])) == infinity[matched])
+        ++matched;
+    return matched > 3 && matched < infinity.size() ? index + matched : 0;
+}
+#endif
 
 constexpr std::uint64_t ConsoleScanSizeLimit = std::uint64_t{1} << 61;
 constexpr int ConsoleScanViolation = -23;
@@ -535,11 +628,33 @@ int ScanSource(TSource source, const char* format, bool secure, NextPointer next
         }
         const bool narrowInteger = !suppress && std::strchr("diouxX", conversion) != nullptr && (length.empty() || length == "h" || length == "hh");
         std::uint64_t wideInteger = 0;
+#if defined(__FreeBSD__)
+        if (conversion == 'i') {
+            std::string ahead;
+            if constexpr (TSource::Contiguous) ahead.assign(source.Remaining(), std::min<std::size_t>(std::strlen(source.Remaining()), 4));
+            else ahead = source.Lookahead(4);
+            if (const char* stop = BinaryPrefixStop(ahead.c_str(), 0)) {
+                const auto zero = static_cast<unsigned long>(stop - ahead.c_str());
+                if (width == 0 || width > zero) width = zero;
+            }
+        }
+#endif
         if (width != 0) directive += std::to_string(width);
         directive += narrowInteger ? std::string("ll") : HostLength(length, conversion);
         directive += specifier;
         directive += "%n";
         const bool floating = std::strchr("aAeEfFgG", conversion) != nullptr;
+#if defined(__FreeBSD__)
+        if (floating) {
+            std::string ahead;
+            if constexpr (TSource::Contiguous) ahead.assign(source.Remaining(), std::min<std::size_t>(std::strlen(source.Remaining()), 10));
+            else ahead = source.Lookahead(10);
+            if (const std::size_t incomplete = IncompleteFloatField(ahead, width); incomplete != 0) {
+                for (std::size_t skipped = 0; skipped < incomplete; ++skipped) source.Skip();
+                return finish(assigned);
+            }
+        }
+#endif
         if constexpr (TSource::Contiguous) if (floating || std::strchr("xXip", conversion) != nullptr) {
             const HexPrefix prefix = CheckHexPrefix(source.Remaining(), width, floating);
             if (prefix == HexPrefix::InputFailure) return finish(converted ? assigned : EOF);
@@ -548,6 +663,10 @@ int ScanSource(TSource source, const char* format, bool secure, NextPointer next
         const int savedError = errno;
         int consumed = -1;
         const int matched = source.Scan(directive.c_str(), suppress, narrowInteger ? &wideInteger : target, &consumed);
+#if defined(__FreeBSD__)
+        if constexpr (TSource::Contiguous) if (floating && consumed >= 511)
+            consumed = LongFloatField(source.Remaining(), width, length, suppress ? nullptr : target);
+#endif
         if constexpr (TSource::Contiguous) if (floating) {
             const bool outOfRange = consumed > 0 && DecimalOutOfRange(std::string(source.Remaining(), static_cast<std::size_t>(consumed)));
             errno = outOfRange ? ERANGE : savedError;
@@ -717,8 +836,8 @@ int APS5_VABI fscanf_nid_postfix(FileStream* stream, const char* format, ...) {
 #else
     std::va_list args;
     va_start(args, format);
-    const int result = HasGuestWideScan(format) ? ScanSource(StreamSource(native), format, false, [&] { return va_arg(args, void*); }, [] { return 0u; })
-                                                : HostVfscanf(native, format, args);
+    const int result = ScansStreamInProcess(format) ? ScanSource(StreamSource(native), format, false, [&] { return va_arg(args, void*); }, [] { return 0u; })
+                                                    : HostVfscanf(native, format, args);
     va_end(args);
 #endif
     stream->SyncStatus();
@@ -1096,7 +1215,7 @@ int APS5_VABI vfscanf_nid_postfix(FileStream* stream, const char* format, VaList
     stream->Orientation(-1);
     if (!stream->SwitchToReading()) return EOF;
     int result = 0;
-    if (HasGuestWideScan(format)) {
+    if (ScansStreamInProcess(format)) {
         LibcDetail::FormatArguments arguments(args);
         result = ScanSource(StreamSource(native), format, false, [&] { return arguments.Next<void*>(); }, [] { return 0u; });
     } else {

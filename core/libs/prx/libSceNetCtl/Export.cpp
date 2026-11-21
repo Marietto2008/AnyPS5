@@ -20,7 +20,7 @@
 #ifdef __linux__
 #include <netpacket/packet.h>
 #endif
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__)
 #include <net/if_dl.h>
 #include <sys/sysctl.h>
 #endif
@@ -307,12 +307,19 @@ struct HostDefaultRoute {
     unsigned long metric = 0;
 };
 
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__)
 struct NetCtlDefaultRoute {
     char name[IF_NAMESIZE];
     in_addr gateway;
     std::uint32_t metric;
 };
+
+// Addresses in a routing message are padded to 4 bytes on macOS and to a long on FreeBSD (SA_SIZE in <net/route.h>).
+#if defined(__FreeBSD__)
+constexpr std::size_t RouteAddressAlignment = sizeof(long);
+#else
+constexpr std::size_t RouteAddressAlignment = sizeof(std::uint32_t);
+#endif
 
 extern "C" std::size_t NetCtlDefaultRoutes_nid_no_patch(const char* table, std::size_t size, NetCtlDefaultRoute* routes, std::size_t capacity) {
     std::size_t count = 0;
@@ -326,7 +333,7 @@ extern "C" std::size_t NetCtlDefaultRoutes_nid_no_patch(const char* table, std::
             if (!(header->rtm_addrs & (1 << index))) continue;
             const auto* address = reinterpret_cast<const sockaddr*>(table + field);
             addresses[index] = address;
-            field += address->sa_len ? (address->sa_len + sizeof(std::uint32_t) - 1) & ~(sizeof(std::uint32_t) - 1) : sizeof(std::uint32_t);
+            field += address->sa_len ? (address->sa_len + RouteAddressAlignment - 1) & ~(RouteAddressAlignment - 1) : RouteAddressAlignment;
         }
         offset = end;
         const auto* destination = addresses[RTAX_DST];
@@ -337,7 +344,11 @@ extern "C" std::size_t NetCtlDefaultRoutes_nid_no_patch(const char* table, std::
         NetCtlDefaultRoute route{};
         if (!if_indextoname(header->rtm_index, route.name)) continue;
         route.gateway = reinterpret_cast<const sockaddr_in*>(gateway)->sin_addr;
+#ifdef RTF_IFSCOPE
         route.metric = (header->rtm_flags & RTF_IFSCOPE) ? 1 : 0;
+#else
+        route.metric = 0;   // FreeBSD has no interface-scoped routes
+#endif
         if (count < capacity) routes[count] = route;
         ++count;
     }
@@ -1008,7 +1019,7 @@ static void HostTraffic(std::uint64_t& sent, std::uint64_t& received) {
         received += NetCtlReadByteCounter_nid_no_patch((statistics + "rx_bytes").c_str());
     }
     freeifaddrs(interfaces);
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) || defined(__FreeBSD__)
     ifaddrs* interfaces = nullptr;
     if (getifaddrs(&interfaces) != 0) throw std::runtime_error("sceNetCtlGetIfStat: the host interface list is unavailable");
     for (auto* item = interfaces; item; item = item->ifa_next) {

@@ -11,6 +11,7 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/specifics/linux/ElfTypes.hpp"
+#include "prx/libc/include/specifics/linux/MainProgram.hpp"
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
 #include "prx/libkernel/Module/EhFrame.hpp"
@@ -130,7 +131,7 @@ int FindRelinkedImage(dl_phdr_info* image, std::size_t, void* data) {
   }
   if (!contains) return 0;
   const std::string_view name = image->dlpi_name != nullptr ? image->dlpi_name : "";
-  search.relinked = name.empty() || name.ends_with(".guest.prx");
+  search.relinked = MainProgramImage(*image) || name.ends_with(".guest.prx");
   return 1;
 }
 

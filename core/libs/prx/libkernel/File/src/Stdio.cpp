@@ -677,13 +677,15 @@ static bool NativeIsPipe(int descriptor) {
 }
 #else
 #include <sys/statvfs.h>
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__)
+#include <sys/param.h>
 #include <sys/mount.h>
 #else
 #include <sys/vfs.h>
 #endif
 static bool NativeIsPipe(int descriptor) {
-#ifdef __APPLE__
+// FreeBSD, like macOS: fstatfs() of an anonymous pipe fails (EINVAL), of a named FIFO succeeds.
+#if defined(__APPLE__) || defined(__FreeBSD__)
     struct stat file{};
     struct statfs kind{};
     return ::fstat(descriptor, &file) == 0 && S_ISFIFO(file.st_mode) && ::fstatfs(descriptor, &kind) != 0;
@@ -711,7 +713,7 @@ static int NativeFstatfs(int descriptor, KernelStatfs* fs) {
     if (S_ISCHR(file.st_mode)) return DeviceFilesystem(fs);
     struct statvfs host{};
     if (::fstatvfs(descriptor, &host) != 0) return SceErrorFromErrno(errno) & 0xffff;
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__) // FreeBSD statvfs has no ST_NOEXEC: use statfs MNT_NOEXEC
     struct statfs mount{};
     const bool noexec = ::fstatfs(descriptor, &mount) == 0 && (mount.f_flags & MNT_NOEXEC);
 #else
@@ -738,7 +740,7 @@ static int FillStatfs(const struct statvfs& host, bool noexec, KernelStatfs* fs)
 static int NativeStatfs(const std::filesystem::path& path, KernelStatfs* fs) {
     struct statvfs host{};
     if (::statvfs(path.c_str(), &host) != 0) return SceErrorFromErrno(errno == ENOENT ? NotFoundError_nid_no_patch(path) : errno) & 0xffff;
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__) // FreeBSD statvfs has no ST_NOEXEC: use statfs MNT_NOEXEC
     struct statfs mount{};
     const bool noexec = ::statfs(path.c_str(), &mount) == 0 && (mount.f_flags & MNT_NOEXEC);
 #else
@@ -1575,7 +1577,17 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
     return finish(index, static_cast<int>(written));
 }
 #else
-static unsigned char GuestEntryType(int fd, const struct dirent64& entry, bool followLinks) {
+#if defined(__FreeBSD__)
+// FreeBSD: getdents(2) returns struct dirent, which has the fields of Linux's dirent64 (64-bit d_off since
+// FreeBSD 12) but calls the inode d_fileno.
+using HostDirent = struct dirent;
+#define APS5_HOST_DIRENT_INODE(entry) ((entry).d_fileno)
+#else
+using HostDirent = struct dirent64;
+#define APS5_HOST_DIRENT_INODE(entry) ((entry).d_ino)
+#endif
+
+static unsigned char GuestEntryType(int fd, const HostDirent& entry, bool followLinks) {
     if (entry.d_type != DT_LNK && entry.d_type != DT_UNKNOWN) return entry.d_type;
     if (entry.d_type == DT_LNK && !followLinks) return DT_LNK;
     const int savedErrno = errno;
@@ -1607,6 +1619,8 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
     std::vector<char> host(std::min(std::max(static_cast<std::size_t>(nbytes), std::size_t{4096}), MaxHostChunk));
 #ifdef __EMSCRIPTEN__
     const auto read = ::getdents(fd, reinterpret_cast<struct dirent*>(host.data()), host.size());
+#elif defined(__FreeBSD__)
+    const auto read = ::getdents(fd, host.data(), host.size());
 #else
     const auto read = ::syscall(SYS_getdents64, fd, host.data(), host.size());
 #endif
@@ -1626,7 +1640,7 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
         return result;
     };
     for (long offset = 0; offset < read;) {
-        const auto* entry = reinterpret_cast<const struct dirent64*>(host.data() + offset);
+        const auto* entry = reinterpret_cast<const HostDirent*>(host.data() + offset);
         const auto nameLength = std::strlen(entry->d_name);
         const auto record = (GuestHeaderBytes + nameLength + 1 + 3) & ~std::size_t{3};
         if (nameLength > GuestMaxName || written + record > static_cast<std::size_t>(nbytes)) {
@@ -1635,7 +1649,7 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
         }
         staged.resize(written + record);
         char* out = staged.data() + written;
-        const auto fileNumber = static_cast<std::uint32_t>(entry->d_ino);
+        const auto fileNumber = static_cast<std::uint32_t>(APS5_HOST_DIRENT_INODE(*entry));
         const auto recordLength = static_cast<std::uint16_t>(record);
         const auto nameBytes = static_cast<std::uint8_t>(nameLength);
         std::memcpy(out, &fileNumber, sizeof(fileNumber));
@@ -1718,6 +1732,9 @@ static int CopyIovecs(const KernelIovec* iov, int iovcnt, std::vector<KernelIove
     if (copied < 0 && errno != EFAULT) throw std::runtime_error("iovec: process_vm_readv failed with errno " + std::to_string(errno));
     errno = saved;
     if (copied < 0 || static_cast<std::size_t>(copied) != bytes) return SceErrorFromErrno(GUEST_EFAULT);
+#elif defined(__FreeBSD__)
+    // No process_vm_readv on FreeBSD: libc's checked copy (the host read was prepared above).
+    if (!GuestCopyInUnsynced_nid_no_patch(vectors.data(), iov, bytes)) return SceErrorFromErrno(GUEST_EFAULT);
 #elif defined(__APPLE__)
     mach_vm_size_t copied = 0;
     if (::mach_vm_read_overwrite(::mach_task_self(), reinterpret_cast<mach_vm_address_t>(iov), bytes,

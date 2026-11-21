@@ -780,7 +780,7 @@ if(BUILD_TESTING)
         set_tests_properties(guest_kernel_pthread_once PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
         add_test_executable(guest_main_stack_tests ${LIBS_INCLUDE_DIR}/tests/GuestMainStack.cpp)
         target_include_directories(guest_main_stack_tests PRIVATE ${LIBS_INCLUDE_DIR})
         target_link_libraries(guest_main_stack_tests PRIVATE libkernel libc)

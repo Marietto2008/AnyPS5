@@ -786,7 +786,8 @@ void* APS5_VABI sceUsbdGetDevice(void* deviceHandle) {
 
 int APS5_VABI sceUsbdGetDeviceSpeed(void* device) {
     if (device == nullptr) return LIBUSB_SPEED_UNKNOWN;
-    return std::min(libusb_get_device_speed(KnownDevice(device, __func__)), static_cast<int>(LIBUSB_SPEED_SUPER));
+    // FreeBSD's libusb returns enum libusb_speed, libusb-1.0 returns int: compare both as int.
+    return std::min(static_cast<int>(libusb_get_device_speed(KnownDevice(device, __func__))), static_cast<int>(LIBUSB_SPEED_SUPER));
 }
 
 std::int32_t APS5_VABI sceUsbdGetMaxIsoPacketSize(void* device, std::uint8_t endpoint) {

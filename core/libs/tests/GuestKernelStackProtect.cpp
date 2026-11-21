@@ -1,4 +1,5 @@
 #include "prx/libkernel/include/Api.hpp"
+#include "prx/libc/include/HostExecutable.hpp"
 #include "prx/libc/include/Api.hpp"
 #include "SceTypes.hpp"
 #include <algorithm>
@@ -17,6 +18,12 @@
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <sys/mman.h>
+#elif defined(__FreeBSD__)
+#include "prx/libc/include/specifics/freebsd/HostMapping.hpp"
+#include <sys/mman.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #else
 #include <sys/mman.h>
 #include <sys/resource.h>
@@ -53,6 +60,26 @@ static PageState QueryPage(std::uintptr_t address) {
     const bool readable = (info.protection & VM_PROT_READ) != 0;
     const bool writable = (info.protection & VM_PROT_WRITE) != 0;
     return {true, readable && writable, 1ull | (readable ? 2ull : 0) | (writable ? 4ull : 0) | ((info.protection & VM_PROT_EXECUTE) != 0 ? 8ull : 0)};
+#elif defined(__FreeBSD__)
+    // No /proc/self/maps: the mapping from kern.proc.vmmap. Below the grown part of a stack lies its growth reserve, a
+    // guard entry that mprotect skips and an access grows into: it is writable stack.
+    PageState state{false, false, 0};
+    std::uint64_t reserveEnd = 0;
+    HostMapping::ForEachEntry("kernel stack protect test", [&](const struct kinfo_vmentry& entry) {
+        if (reserveEnd != 0) {
+            if (entry.kve_start == reserveEnd && (entry.kve_flags & KVME_FLAG_GROWS_DOWN) != 0) state = {true, true, 1ull | 2ull | 4ull};
+            return false;
+        }
+        if (address < entry.kve_start || address >= entry.kve_end) return entry.kve_start <= address;
+        if (entry.kve_type == KVME_TYPE_GUARD) {
+            reserveEnd = entry.kve_end;
+            return true;
+        }
+        const auto mapping = HostMapping::FromEntry(entry);
+        state = {true, mapping.readable && mapping.writable, 1ull | (mapping.readable ? 2ull : 0) | (mapping.writable ? 4ull : 0) | (mapping.executable ? 8ull : 0)};
+        return false;
+    });
+    return state;
 #else
     std::FILE* maps = std::fopen("/proc/self/maps", "r");
     Require(maps != nullptr);
@@ -257,7 +284,7 @@ static void* APS5_VABI Worker(void* arg) {
     if (outside >= Page) {
         const int straddle = mprotect_nid_postfix(reinterpret_cast<void*>(outside - Page), 2 * Page, 3);
         Require(QueryPage(below).raw == belowBefore);
-#ifndef __linux__
+#if !defined(__linux__) && !defined(__FreeBSD__) // the page below a Linux or FreeBSD stack is not mapped
         Require(straddle == 0);
 #else
         (void)straddle;
@@ -517,12 +544,17 @@ static bool OvercommitStrict() {
 }
 
 static bool ChildPasses(const char* mode, bool unlimitedStack) {
+#if defined(__FreeBSD__)
+    const std::string self = HostExecutable::Own("test").string();   // no /proc/self/exe; taken before the fork
+#else
+    const std::string self = "/proc/self/exe";
+#endif
     const pid_t child = fork();
     Require(child >= 0);
     if (child == 0) {
         rlimit limit{};
         if (unlimitedStack && getrlimit(RLIMIT_STACK, &limit) == 0) limit.rlim_cur = RLIM_INFINITY;
-        if (!unlimitedStack || setrlimit(RLIMIT_STACK, &limit) == 0) execl("/proc/self/exe", "/proc/self/exe", mode, static_cast<char*>(nullptr));
+        if (!unlimitedStack || setrlimit(RLIMIT_STACK, &limit) == 0) execl(self.c_str(), self.c_str(), mode, static_cast<char*>(nullptr));
         std::_Exit(127);
     }
     int status = 0;

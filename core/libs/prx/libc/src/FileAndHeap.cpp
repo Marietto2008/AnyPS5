@@ -953,7 +953,8 @@ int APS5_VABI fflush_nid_postfix(FileStream* stream) {
     if (stream && (stream->IsRandomDevice() || stream->IsDirectory())) return 0;
 #ifdef __linux__
     if (native && !__fwriting(native)) return 0;
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+    // BSD stdio: fflush of a stream not open for writing fails with EBADF on FreeBSD.
     if (native && !(native->_flags & __SWR)) return 0;
 #endif
     const int previousError = errno;

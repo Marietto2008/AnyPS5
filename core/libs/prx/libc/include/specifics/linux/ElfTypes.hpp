@@ -1,7 +1,7 @@
 #ifndef PRX_LIBC_INCLUDE_SPECIFICS_LINUX_ELFTYPES_HPP
 #define PRX_LIBC_INCLUDE_SPECIFICS_LINUX_ELFTYPES_HPP
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__FreeBSD__) // FreeBSD has the real <link.h> (dl_phdr_info as glibc)
 #include <link.h>
 #else
 

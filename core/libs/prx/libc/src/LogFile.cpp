@@ -1,4 +1,5 @@
 #include "prx/libc/include/LogFile.hpp"
+#include "prx/libc/include/LibraryAtExit.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 #include "prx/libc/include/general/LogMacros.hpp"
 #include <algorithm>
@@ -299,7 +300,7 @@ namespace {
     if (!error.empty()) FailStartup(error + "\n");
     if (session == nullptr) return false;
     g_session.store(session.release(), std::memory_order_release);
-    std::atexit([] {
+    LibraryAtExit([] {
         std::fflush(nullptr);
         Flush();
     });

@@ -34,7 +34,11 @@
 #include <system_error>
 
 #ifndef _WIN32
+#if defined(__FreeBSD__)
+#include <stdlib.h> // alloca() lives here on FreeBSD (no <alloca.h>)
+#else
 #include <alloca.h>
+#endif
 #include <cerrno>
 #include <csetjmp>
 #include <csignal>
@@ -49,6 +53,12 @@
 
 #ifdef __linux__
 #include <sys/syscall.h>
+#elif defined(__FreeBSD__)
+#include <pthread_np.h>
+#include <sys/auxv.h>
+#include <sys/sysctl.h>
+#include <sys/thr.h>
+#include <prx/libc/include/specifics/freebsd/Compat.hpp>
 #else
 static const auto initialThreadId = std::this_thread::get_id();
 #endif
@@ -56,6 +66,9 @@ static const auto initialThreadId = std::this_thread::get_id();
 extern "C" bool IsInitialPthread_nid_no_patch() {
 #ifdef __linux__
     return ::syscall(SYS_gettid) == ::getpid();
+#elif defined(__FreeBSD__)
+    // FreeBSD: thread ids are lwpids, never the pid; the kernel answers the question directly.
+    return ::pthread_main_np() == 1;
 #else
     return std::this_thread::get_id() == initialThreadId;
 #endif
@@ -118,7 +131,7 @@ static GuestThreadState& CurrentGuestState() {
 static std::mutex& stackLock = *new std::mutex();
 static auto& liveStacks = *new std::map<PthreadPrivate*, std::pair<std::uintptr_t, std::uintptr_t>>();
 static auto& protectedStackPages = *new std::map<std::uintptr_t, std::size_t>();
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
 struct GuestStackMapping {
     std::uintptr_t mappingEnd;
     std::uintptr_t stackStart;
@@ -145,7 +158,7 @@ static std::atomic<std::uintptr_t> guestMainStackLow{0};
 static std::atomic<std::uintptr_t> guestMainStackHigh{0};
 #endif
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
 static constexpr std::size_t GUEST_STACK_GUARD = PS5_PAGE_SIZE;
 
 struct RetiredStack {
@@ -325,9 +338,14 @@ static void FreeGuestStack(PthreadPrivate* thread) {
 
 static bool HostThreadGone(int hostTid) {
     if (hostTid == 0) return false;
+#if defined(__FreeBSD__)
+    // No /proc/self/task on FreeBSD: thr_kill(2) with signal 0 only looks the thread up, ESRCH once it has exited.
+    return thr_kill(hostTid, 0) != 0 && errno == ESRCH;
+#else
     char path[48];
     std::snprintf(path, sizeof(path), "/proc/self/task/%d", hostTid);
     return access(path, F_OK) != 0;
+#endif
 }
 
 static void ReapRetiredStacks() {
@@ -381,7 +399,7 @@ static std::uintptr_t PrecommittedStackStart(std::uintptr_t low, std::uintptr_t 
 #endif
 
 static bool HostStackLimits(std::uintptr_t* low, std::uintptr_t* high) {
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
     const auto mainLow = guestMainStackLow.load(std::memory_order_acquire);
     const auto mainHigh = guestMainStackHigh.load(std::memory_order_acquire);
     const auto frame = reinterpret_cast<std::uintptr_t>(__builtin_frame_address(0));
@@ -409,8 +427,18 @@ static bool HostStackLimits(std::uintptr_t* low, std::uintptr_t* high) {
     static thread_local std::uintptr_t stackHigh = 0;
     if (stackHigh == 0) {
         pthread_attr_t attr;
+#if defined(__FreeBSD__)
+        // FreeBSD: pthread_attr_get_np() fills an attribute object that must already be initialised.
+        if (pthread_attr_init(&attr) != 0)
+            return false;
+        if (pthread_attr_get_np(pthread_self(), &attr) != 0) {
+            pthread_attr_destroy(&attr);
+            return false;
+        }
+#else
         if (pthread_getattr_np(pthread_self(), &attr) != 0)
             return false;
+#endif
         void* address = nullptr;
         std::size_t size = 0;
         const bool queried = pthread_attr_getstack(&attr, &address, &size) == 0;
@@ -419,6 +447,18 @@ static bool HostStackLimits(std::uintptr_t* low, std::uintptr_t* high) {
             return false;
         stackLow = reinterpret_cast<std::uintptr_t>(address);
         stackHigh = stackLow + size;
+#if defined(__FreeBSD__)
+        // The main thread's reservation starts with security.bsd.stack_guard_page pages the stack never grows into
+        // (glibc reports its guard gap outside the range). The main thread is told by its stack top, which the kernel
+        // passes in the auxiliary vector: pthread_main_np() is not settled yet when a library constructor asks.
+        unsigned long mainTop = 0;
+        if (elf_aux_info(AT_USRSTACKBASE, &mainTop, sizeof(mainTop)) == 0 && mainTop == stackHigh) {
+            int guardPages = 0;
+            std::size_t length = sizeof(guardPages);
+            if (sysctlbyname("security.bsd.stack_guard_page", &guardPages, &length, nullptr, 0) == 0 && guardPages > 0)
+                stackLow += static_cast<std::uintptr_t>(guardPages) * static_cast<std::uintptr_t>(getpagesize());
+        }
+#endif
     }
     *low = stackLow;
     *high = stackHigh;
@@ -554,7 +594,7 @@ bool GuestThreadStack(std::uintptr_t address, std::uintptr_t* start, std::uintpt
 }
 
 bool GuestThreadStackHostRangeOverlaps(std::uintptr_t start, std::uintptr_t end) {
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
     std::lock_guard lock(guestStackMappingsLock);
     auto it = guestStackMappings.upper_bound(start);
     if (it != guestStackMappings.begin()) --it;
@@ -817,8 +857,15 @@ bool GuestThreadCpuNanos(int cpuClockThread, std::uint64_t* nanos) {
         static_cast<std::uint64_t>(info.user_time.microseconds) + static_cast<std::uint64_t>(info.system_time.microseconds);
     *nanos = microseconds * 1000ULL;
 #else
+    clockid_t clock = thread->hostCpuClock;
+#if defined(__FreeBSD__)
+    // FreeBSD's per-thread CPU clock only counts up to the thread's last context switch, even when the thread asks
+    // about itself; CLOCK_THREAD_CPUTIME_ID also counts the running slice.
+    clockid_t own{};
+    if (pthread_getcpuclockid(pthread_self(), &own) == 0 && own == clock) clock = CLOCK_THREAD_CPUTIME_ID;
+#endif
     struct timespec time{};
-    if (clock_gettime(thread->hostCpuClock, &time) != 0)
+    if (clock_gettime(clock, &time) != 0)
         throw std::system_error(errno, std::generic_category(), "Querying guest thread CPU time");
     *nanos = static_cast<std::uint64_t>(time.tv_sec) * 1000000000ULL + static_cast<std::uint64_t>(time.tv_nsec);
 #endif
@@ -1168,7 +1215,7 @@ static void* StartNativeThread(void* opaque) {
             throw std::runtime_error("Cannot query guest thread stack");
         self->stackAddress = reinterpret_cast<void*>((high - reserve - self->stackSize) & ~std::uintptr_t{PS5_PAGE_SIZE - 1});
         self->threadId = std::this_thread::get_id();
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
         self->hostTid = static_cast<int>(gettid());
         RegisterGuestStackMapping(self);
 #endif
@@ -1277,7 +1324,7 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
     sigset_t creatorMask;
     pthread_sigmask(SIG_SETMASK, nullptr, &creatorMask);
     args->signalMask = creatorMask;
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
     ReapRetiredStacks();
     AllocateGuestStack(p.get(), nativeStack);
 #endif
@@ -1288,7 +1335,7 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
         FreeGuestStack(p.get());
         throw std::system_error(result, std::generic_category(), "Creating guest thread");
     }
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
     int created = pthread_attr_setstack(&nativeAttr, static_cast<char*>(p->guestStack) + GUEST_STACK_GUARD, p->guestStackBytes - GUEST_STACK_GUARD);
 #else
     int created = pthread_attr_setstacksize(&nativeAttr, nativeStack);

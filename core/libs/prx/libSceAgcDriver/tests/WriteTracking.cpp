@@ -10,6 +10,7 @@
 #include <psapi.h>
 #else
 #include <sys/mman.h>
+#include "prx/libc/include/specifics/freebsd/LinuxMmapFlags.hpp"
 #include <unistd.h>
 #endif
 #ifdef __GLIBC__

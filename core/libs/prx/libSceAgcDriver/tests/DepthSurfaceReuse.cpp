@@ -28,6 +28,7 @@
 #include <windows.h>
 #else
 #include <sys/mman.h>
+#include "prx/libc/include/specifics/freebsd/LinuxMmapFlags.hpp"
 #endif
 
 namespace {

@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBC_INCLUDE_SONYCRT_HPP
 
 #include <bit>
+#include <cctype>
 #include <cfenv>
 #include <cerrno>
 #include <climits>
@@ -95,8 +96,26 @@ inline std::int64_t SonyHostDaylightAmount_nid_no_patch(std::int64_t utcTime) {
     return 0;
 }
 
+#if defined(__FreeBSD__)
+// FreeBSD's strtol and scanf read C23's 0b prefix, which the guest's libc predates: there "0b1" is 0 followed by
+// "b1". Returns where the guest stops ('b'), or nullptr when the host reads the text as the guest does.
+inline const char* BinaryPrefixStop(const char* text, int base) {
+    if (base != 0 && base != 2) return nullptr;
+    while (std::isspace(static_cast<unsigned char>(*text))) ++text;
+    if (*text == '+' || *text == '-') ++text;
+    if (text[0] != '0' || (text[1] != 'b' && text[1] != 'B') || (text[2] != '0' && text[2] != '1')) return nullptr;
+    return text + 1;
+}
+#endif
+
 template<typename TInteger>
 inline TInteger ParseInteger(const char* text, char** end, int base, TInteger (*parse)(const char*, char**, int)) {
+#if defined(__FreeBSD__)
+    if (const char* stop = BinaryPrefixStop(text, base)) {
+        if (end != nullptr) *end = const_cast<char*>(stop);
+        return 0;
+    }
+#endif
 #ifdef _WIN32
     if constexpr (std::is_unsigned_v<TInteger>) {
         const int saved = errno;
@@ -107,7 +126,7 @@ inline TInteger ParseInteger(const char* text, char** end, int base, TInteger (*
         return value;
     }
 #endif
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__) // BSD libc: EINVAL when nothing converts, which the guest's does not set
     const int saved = errno;
     char* parsedEnd = nullptr;
     const TInteger value = parse(text, &parsedEnd, base);

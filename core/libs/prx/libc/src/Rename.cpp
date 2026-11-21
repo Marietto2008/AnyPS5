@@ -146,7 +146,7 @@ static int RenamePath_nid_no_patch(const std::filesystem::path& source, const st
         error.clear();
         sameFile = fs::equivalent(actualSource, checkedDest, error);
         if (error == std::errc::no_such_file_or_directory) error.clear();
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__) // libc++ answers a dangling link with not_supported
         if (error == std::errc::not_supported) error.clear();
 #endif
         if (error) return FilesystemError(error);

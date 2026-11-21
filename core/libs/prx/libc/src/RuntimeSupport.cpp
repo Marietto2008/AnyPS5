@@ -1,4 +1,5 @@
 #include "prx/libc/include/Api.hpp"
+#include "prx/libc/include/LibraryAtExit.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <cstdint>
@@ -72,7 +73,7 @@ int APS5_VABI __cxa_atexit_nid_postfix(void (APS5_VABI *func)(void*), void* arg,
     g_exitDestructors.push_back({func, arg, dsoHandle});
     if (!g_exitRunnerRegistered) {
         g_exitRunnerRegistered = true;
-        std::atexit([] { CxaFinalize_nid_no_patch(nullptr); });
+        LibraryAtExit([] { CxaFinalize_nid_no_patch(nullptr); });
     }
     return 0;
 }

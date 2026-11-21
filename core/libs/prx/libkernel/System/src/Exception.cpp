@@ -3,6 +3,10 @@
 #include <cstddef>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/specifics/freebsd/Compat.hpp"
+#if defined(__linux__) || defined(__FreeBSD__)
+#include "prx/libc/include/specifics/linux/MainProgram.hpp"
+#endif
 #include "prx/libc/include/GuestArena.hpp"
 #include "prx/libc/include/GuestWriteWatch.hpp"
 #include "prx/libc/include/HostFault.hpp"
@@ -33,6 +37,10 @@
 #include <pthread.h>
 #ifndef __APPLE__
 #include <ucontext.h>
+#endif
+#ifdef __FreeBSD__
+#include <machine/psl.h> // PSL_USERCHANGE for ToHost()
+#include <machine/trap.h> // T_* trap numbers of mc_trapno
 #endif
 #include <unistd.h>
 #endif
@@ -1098,6 +1106,64 @@ void ToHost(const GuestMcontext& m, mcontext_t& host) {
     g.__rflags = m.rflags;
     std::memcpy(reinterpret_cast<unsigned char*>(&host->__fs) + FxsaveImageOffset, m.fpstate, FxsaveRegisterBytes);
 }
+#elif defined(__FreeBSD__)
+// FreeBSD, the PS5's own base: mcontext_t names the registers mc_*; the FPU image is the fxsave area
+// mc_fpstate, meaningful when mc_ownedfp != _MC_FPOWNED_NONE and mc_fpformat == _MC_FPFMT_XMM.
+bool HostFxsaveValid(const mcontext_t& host) {
+    return host.mc_ownedfp != _MC_FPOWNED_NONE && host.mc_fpformat == _MC_FPFMT_XMM;
+}
+
+void FromHost(const mcontext_t& host, GuestMcontext& m) {
+    m.rdi = static_cast<std::uint64_t>(host.mc_rdi);
+    m.rsi = static_cast<std::uint64_t>(host.mc_rsi);
+    m.rdx = static_cast<std::uint64_t>(host.mc_rdx);
+    m.rcx = static_cast<std::uint64_t>(host.mc_rcx);
+    m.r8 = static_cast<std::uint64_t>(host.mc_r8);
+    m.r9 = static_cast<std::uint64_t>(host.mc_r9);
+    m.rax = static_cast<std::uint64_t>(host.mc_rax);
+    m.rbx = static_cast<std::uint64_t>(host.mc_rbx);
+    m.rbp = static_cast<std::uint64_t>(host.mc_rbp);
+    m.r10 = static_cast<std::uint64_t>(host.mc_r10);
+    m.r11 = static_cast<std::uint64_t>(host.mc_r11);
+    m.r12 = static_cast<std::uint64_t>(host.mc_r12);
+    m.r13 = static_cast<std::uint64_t>(host.mc_r13);
+    m.r14 = static_cast<std::uint64_t>(host.mc_r14);
+    m.r15 = static_cast<std::uint64_t>(host.mc_r15);
+    m.rip = static_cast<std::uint64_t>(host.mc_rip);
+    m.rsp = static_cast<std::uint64_t>(host.mc_rsp);
+    m.rflags = static_cast<std::uint64_t>(host.mc_rflags);
+    m.cs = static_cast<std::uint64_t>(host.mc_cs) & 0xffffu;
+    m.ss = static_cast<std::uint64_t>(host.mc_ss) & 0xffffu;
+    m.len = sizeof(GuestMcontext);
+    static_assert(sizeof(host.mc_fpstate) <= sizeof(m.fpstate) && FxsaveRegisterBytes <= sizeof(host.mc_fpstate));
+    if (HostFxsaveValid(host)) std::memcpy(m.fpstate, host.mc_fpstate, sizeof(host.mc_fpstate));
+}
+
+void ToHost(const GuestMcontext& m, mcontext_t& host) {
+    host.mc_rdi = static_cast<__register_t>(m.rdi);
+    host.mc_rsi = static_cast<__register_t>(m.rsi);
+    host.mc_rdx = static_cast<__register_t>(m.rdx);
+    host.mc_rcx = static_cast<__register_t>(m.rcx);
+    host.mc_r8 = static_cast<__register_t>(m.r8);
+    host.mc_r9 = static_cast<__register_t>(m.r9);
+    host.mc_rax = static_cast<__register_t>(m.rax);
+    host.mc_rbx = static_cast<__register_t>(m.rbx);
+    host.mc_rbp = static_cast<__register_t>(m.rbp);
+    host.mc_r10 = static_cast<__register_t>(m.r10);
+    host.mc_r11 = static_cast<__register_t>(m.r11);
+    host.mc_r12 = static_cast<__register_t>(m.r12);
+    host.mc_r13 = static_cast<__register_t>(m.r13);
+    host.mc_r14 = static_cast<__register_t>(m.r14);
+    host.mc_r15 = static_cast<__register_t>(m.r15);
+    host.mc_rip = static_cast<__register_t>(m.rip);
+    host.mc_rsp = static_cast<__register_t>(m.rsp);
+    // sigreturn(2) refuses a context whose privileged RFLAGS bits changed (Linux masks them itself):
+    // only the user-changeable ones come from the guest.
+    host.mc_rflags = static_cast<__register_t>((static_cast<std::uint64_t>(host.mc_rflags) & ~std::uint64_t{PSL_USERCHANGE})
+        | (m.rflags & std::uint64_t{PSL_USERCHANGE}));
+    if (HostFxsaveValid(host)) std::memcpy(host.mc_fpstate, m.fpstate, FxsaveRegisterBytes);
+}
+
 #else
 void FromHost(const mcontext_t& host, GuestMcontext& m) {
     const auto* g = host.gregs;
@@ -1162,11 +1228,17 @@ void Deliver(int signum, siginfo_t*, void* context) {
     auto& host = static_cast<ucontext_t*>(context)->uc_mcontext;
     GuestUcontext ucontext{};
     FromHost(host, ucontext.mcontext);
+#if defined(__FreeBSD__)
+    if (const auto self = scePthreadSelf()) self->pendingException.store(0, std::memory_order_release);
+#endif
     CallHandler(handler, RaisedSignal, ucontext);
     ToHost(ucontext.mcontext, host);
 }
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__FreeBSD__)
+#ifdef __FreeBSD__
+using greg_t = __register_t;
+#endif
 constexpr std::array<int, 4> FaultSignals{SIGSEGV, SIGBUS, SIGILL, SIGFPE};
 constexpr greg_t VectorDivide = 0;
 constexpr greg_t VectorInvalidOpcode = 6;
@@ -1181,10 +1253,46 @@ constexpr std::string_view GuestModuleSuffix = ".guest.prx";
 
 std::array<struct sigaction, FaultSignals.size()> previousFaultActions{};
 
+// A signal another process (or raise) sent, as opposed to a fault: si_code <= 0 on Linux, SI_USER (0x10001) and
+// above on FreeBSD, whose faults carry small positive codes as Linux does.
+bool SentByProcess(const siginfo_t* info) {
+#ifdef __FreeBSD__
+    return info->si_code <= 0 || info->si_code >= SI_USER;
+#else
+    return info->si_code <= 0;
+#endif
+}
+
+#ifdef __FreeBSD__
+// FreeBSD numbers traps its own way (x86/trap.h): translate mc_trapno to the x86 vector Classify speaks.
+// mc_addr is the faulting address (CR2) of a page fault, mc_err the hardware error code.
+greg_t HostVector(const mcontext_t& host) {
+    switch (host.mc_trapno) {
+    case T_DIVIDE: return VectorDivide;
+    case T_PRIVINFLT: return VectorInvalidOpcode;
+    case T_SEGNPFLT: return VectorSegmentNotPresent;
+    case T_STKFLT: return VectorStack;
+    case T_PROTFLT: return VectorProtection;
+    case T_PAGEFLT: return VectorPage;
+    case T_ARITHTRAP: return VectorFloatingPoint;
+    case T_ALIGNFLT: return VectorAlignment;
+    case T_XMMFLT: return VectorSimd;
+    default: return -1;
+    }
+}
+greg_t HostError(const mcontext_t& host) { return host.mc_err; }
+greg_t HostFaultAddress(const mcontext_t& host) { return host.mc_addr; }
+greg_t HostRip(const mcontext_t& host) { return host.mc_rip; }
+#else
+greg_t HostVector(const mcontext_t& host) { return host.gregs[REG_TRAPNO]; }
+greg_t HostError(const mcontext_t& host) { return host.gregs[REG_ERR]; }
+greg_t HostFaultAddress(const mcontext_t& host) { return host.gregs[REG_CR2]; }
+greg_t HostRip(const mcontext_t& host) { return host.gregs[REG_RIP]; }
+#endif
+
 bool Classify(int hostSignal, const mcontext_t& host, Fault& fault) {
-    const auto* g = host.gregs;
-    const auto error = static_cast<std::uint64_t>(g[REG_ERR]);
-    switch (g[REG_TRAPNO]) {
+    const auto error = static_cast<std::uint64_t>(HostError(host));
+    switch (HostVector(host)) {
     case VectorDivide:
         fault = {SignalFloatingPoint, {TrapDivide, 0, 0}};
         return hostSignal == SIGFPE;
@@ -1201,7 +1309,7 @@ bool Classify(int hostSignal, const mcontext_t& host, Fault& fault) {
         fault = {SignalBus, {TrapProtection, 0, error}};
         return true;
     case VectorPage:
-        fault = {hostSignal == SIGBUS ? SignalBus : SignalSegmentation, {TrapPage, static_cast<std::uint64_t>(g[REG_CR2]), error}};
+        fault = {hostSignal == SIGBUS ? SignalBus : SignalSegmentation, {TrapPage, static_cast<std::uint64_t>(HostFaultAddress(host)), error}};
         return hostSignal == SIGSEGV || hostSignal == SIGBUS;
     case VectorFloatingPoint:
         fault = {SignalFloatingPoint, {TrapArithmetic, 0, 0}};
@@ -1230,7 +1338,7 @@ bool GuestCode(std::uintptr_t rip) {
 #endif
     if (!native) return false;
     const std::string_view name = native->l_name ? native->l_name : "";
-    return name.empty() || name.ends_with(GuestModuleSuffix);
+    return MainProgramMap(*native) || name.ends_with(GuestModuleSuffix);
 }
 
 void ChainFault(int hostSignal, siginfo_t* info, void* context) {
@@ -1245,19 +1353,19 @@ void ChainFault(int hostSignal, siginfo_t* info, void* context) {
             previous.sa_handler(hostSignal);
             return;
         }
-        if (info->si_code <= 0 && previous.sa_handler == SIG_IGN) return;
+        if (SentByProcess(info) && previous.sa_handler == SIG_IGN) return;
     }
     ::signal(hostSignal, SIG_DFL);
-    if (info->si_code <= 0) ::raise(hostSignal);
+    if (SentByProcess(info)) ::raise(hostSignal);
 }
 
 void DeliverFault(int hostSignal, siginfo_t* info, void* context) {
     auto& host = static_cast<ucontext_t*>(context)->uc_mcontext;
     Fault fault{};
-    const bool deliverable = info->si_code > 0 && Classify(hostSignal, host, fault);
+    const bool deliverable = !SentByProcess(info) && Classify(hostSignal, host, fault);
     if (deliverable && fault.trap.number == TrapPage && GuestWriteWatch::GuestWriteWatchHandleFault_nid_postfix(fault.trap.address)) return;
     const auto handler = deliverable ? Handler(fault.signum) : nullptr;
-    if (handler == nullptr || !GuestCode(static_cast<std::uintptr_t>(host.gregs[REG_RIP]))) {
+    if (handler == nullptr || !GuestCode(static_cast<std::uintptr_t>(HostRip(host)))) {
         ChainFault(hostSignal, info, context);
         return;
     }
@@ -1296,7 +1404,15 @@ void InstallDelivery() {
 }
 
 bool Send(Pthread thread) {
+#if defined(__FreeBSD__)
+    // FreeBSD queues a standard signal sent to a thread again while one is pending (the guest's, like Linux, keeps
+    // one): a raise that finds one undelivered folds into it. Deliver clears the mark before it runs the handler.
+    if (thread->pendingException.exchange(1, std::memory_order_acq_rel) != 0) return true;
+#endif
     const int result = pthread_kill(thread->hostThread, HostSignal);
+#if defined(__FreeBSD__)
+    if (result != 0) thread->pendingException.store(0, std::memory_order_release);
+#endif
     if (result == ESRCH) return false;
     if (result != 0) throw std::system_error(result, std::generic_category(), "sceKernelRaiseException: cannot signal the target thread");
     return true;
@@ -1438,7 +1554,7 @@ int APS5_VABI sceKernelInstallExceptionHandler(int signum, void* handler) {
  if (!Allowed(signum) || handler == nullptr) return SCE_KERNEL_ERROR_EINVAL;
  void* expected = nullptr;
  if (!handlers[signum].compare_exchange_strong(expected, handler, std::memory_order_acq_rel)) return SCE_KERNEL_ERROR_EAGAIN;
-#if defined(_WIN32) || defined(__linux__)
+#if defined(_WIN32) || defined(__linux__) || defined(__FreeBSD__)
  if (FaultSignal(signum)) InstallFaultDelivery();
 #endif
  return 0;

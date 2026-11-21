@@ -240,7 +240,7 @@ target_compile_options(fvad PRIVATE $<$<C_COMPILER_ID:GNU,Clang,AppleClang>:-fno
 target_sources(libwebrtc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/prx/libwebrtc/Vad.cpp)
 target_include_directories(libwebrtc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/3rdparty/libfvad/src)
 target_link_libraries(libwebrtc PRIVATE fvad)
-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
     target_link_options(libwebrtc PRIVATE LINKER:--exclude-libs,ALL)
 endif()
 

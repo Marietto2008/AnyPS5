@@ -57,7 +57,7 @@
 #include <thread>
 #include <unordered_map>
 #include <utility>
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__FreeBSD__)
 #include <unistd.h>
 #endif
 
@@ -5256,7 +5256,7 @@ bool StorageTexture::pendingUnitInside(std::uint64_t address, std::size_t bytes)
 
 namespace {
 
-#if defined(__APPLE__)
+#if defined(APS5_PROTECTION_WRITE_WATCH)
 std::atomic<bool> labelTrapsSet{false};
 
 std::uint64_t TrapPage() {
@@ -5366,7 +5366,7 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
                 ++it;
             }
         }
-#if defined(__APPLE__)
+#if defined(APS5_PROTECTION_WRITE_WATCH)
         if (!flush.empty() && labelTrapsSet.load(std::memory_order_relaxed)) {
             const auto selected = flush.size();
             for (auto it = pending.textures.begin(); it != pending.textures.end();) {
@@ -5905,7 +5905,7 @@ std::size_t StorageTexture::StoreSmallPending(const char* reason) {
     return stored;
 }
 
-#if defined(__APPLE__)
+#if defined(APS5_PROTECTION_WRITE_WATCH)
 bool StorageTexture::trapReadsAtLabel(const StorageTexture* texture) {
     auto& pending = Pending();
     const auto page = TrapPage();
@@ -5937,13 +5937,13 @@ void StorageTexture::StoreReadbackBeforeLabel(const char* reason, VkDevice devic
     {
         auto& pending = Pending();
         std::lock_guard lock(pending.mutex);
-#if defined(__APPLE__)
+#if defined(APS5_PROTECTION_WRITE_WATCH)
         const bool trap = LabelTrapsEnabled();
         if (trap) labelTrapsSet.store(true, std::memory_order_relaxed);
 #endif
         for (const auto* texture : pending.textures) {
             if (texture->descriptor.tileMode != TextureTileMode::kLinear && texture->guestBytes > SmallStoreBytes) continue;
-#if defined(__APPLE__)
+#if defined(APS5_PROTECTION_WRITE_WATCH)
             if (trap && trapReadsAtLabel(texture)) continue;
 #endif
             ranges.emplace_back(texture->descriptor.baseAddress, static_cast<std::size_t>(texture->guestBytes));
@@ -5968,14 +5968,14 @@ std::size_t StorageTexture::StoreDrawnLinear(const char* reason) {
     std::vector<std::pair<std::uint64_t, std::size_t>> ranges;
     {
         std::lock_guard lock(pending.mutex);
-#if defined(__APPLE__)
+#if defined(APS5_PROTECTION_WRITE_WATCH)
         const bool trap = (std::strcmp(reason, "label") == 0 || std::strcmp(reason, "interrupt") == 0) && LabelTrapsEnabled();
         if (trap) labelTrapsSet.store(true, std::memory_order_relaxed);
 #endif
         for (const auto& entry : pending.drawn) {
             const auto* texture = entry.texture;
             if (!texture->dirty) continue;
-#if defined(__APPLE__)
+#if defined(APS5_PROTECTION_WRITE_WATCH)
             if (trap && texture->descriptor.tileMode == TextureTileMode::kLinear && HostImportCovers(texture->context, texture->descriptor.baseAddress, static_cast<std::size_t>(texture->guestBytes)) && trapReadsAtLabel(texture)) continue;
 #endif
             ranges.emplace_back(texture->descriptor.baseAddress, static_cast<std::size_t>(texture->guestBytes));
@@ -7628,7 +7628,7 @@ std::uint64_t StorageTexture::borrowUnits(StorageTexture& source, const std::vec
 }
 
 void StorageTexture::releaseReadTraps(bool sharingPages) {
-#if defined(__APPLE__)
+#if defined(APS5_PROTECTION_WRITE_WATCH)
     if (!labelTrapsSet.load(std::memory_order_relaxed)) return;
     const auto release = [](const StorageTexture* texture) {
         if (texture->readTrapped.exchange(false, std::memory_order_acq_rel)) GuestWriteWatch::GuestWriteWatchReleaseReads_nid_postfix(static_cast<std::uintptr_t>(texture->descriptor.baseAddress), static_cast<std::size_t>(texture->guestBytes));
@@ -7652,7 +7652,7 @@ void StorageTexture::releaseReadTraps(bool sharingPages) {
 }
 
 void StorageTexture::storeTrappedOverlaps(const char* reason) {
-#if defined(__APPLE__)
+#if defined(APS5_PROTECTION_WRITE_WATCH)
     if (!labelTrapsSet.load(std::memory_order_relaxed)) return;
     std::vector<std::pair<std::uint64_t, std::size_t>> ranges;
     {

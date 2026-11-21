@@ -1,6 +1,7 @@
 #include "prx/libSceNpWebApi2/include/Api.hpp"
 #include "prx/libc/include/GuestArena.hpp"
 #include "SceTypes.hpp"
+#include <initializer_list>
 #include <cstddef>
 #include <cerrno>
 #include <cstdint>

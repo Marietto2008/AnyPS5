@@ -41,6 +41,9 @@
 #include <sys/resource.h>
 #ifdef __APPLE__
 #include <mach/mach.h>
+#elif defined(__FreeBSD__)
+#include <sys/sysctl.h>
+#include "prx/libc/include/specifics/freebsd/HostMapping.hpp"
 #endif
 #endif
 
@@ -632,6 +635,20 @@ std::optional<std::uint64_t> ReadProcessPrivateBytes() {
     mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
     if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &count) != KERN_SUCCESS || info.phys_footprint == 0) return std::nullopt;
     return static_cast<std::uint64_t>(info.phys_footprint);
+#elif defined(__FreeBSD__)
+    // No /proc/self/status: the resident private pages of the anonymous mappings, as kern.proc.vmmap counts them
+    // (RssAnon; FreeBSD keeps no per-process swap count).
+    std::uint64_t pages = 0;
+    try {
+        HostMapping::ForEachEntry("process private memory", [&](const struct kinfo_vmentry& entry) {
+            if (HostMapping::FromEntry(entry).inode == 0 && entry.kve_private_resident > 0) pages += static_cast<std::uint64_t>(entry.kve_private_resident);
+            return true;
+        });
+    } catch (const std::runtime_error&) {
+        return std::nullopt;
+    }
+    if (pages == 0) return std::nullopt;
+    return pages * static_cast<std::uint64_t>(sysconf(_SC_PAGESIZE));
 #else
     std::FILE* status = std::fopen("/proc/self/status", "r");
     if (status == nullptr) return std::nullopt;
@@ -690,6 +707,16 @@ std::optional<OverlayMemory> ReadCommitCharge() {
     if (K32GetPerformanceInfo(&information, sizeof(information)) == 0) return std::nullopt;
     const auto page = static_cast<std::uint64_t>(information.PageSize);
     return OverlayMemory{static_cast<std::uint64_t>(information.CommitTotal) * page, static_cast<std::uint64_t>(information.CommitLimit) * page};
+#elif defined(__FreeBSD__)
+    // No /proc/meminfo: the swap reservation is FreeBSD's commit charge, against swap plus physical memory.
+    std::uint64_t reserved = 0, swap = 0, physical = 0;
+    std::size_t length = sizeof(reserved);
+    if (sysctlbyname("vm.swap_reserved", &reserved, &length, nullptr, 0) != 0) return std::nullopt;
+    length = sizeof(swap);
+    if (sysctlbyname("vm.swap_total", &swap, &length, nullptr, 0) != 0) return std::nullopt;
+    length = sizeof(physical);
+    if (sysctlbyname("hw.physmem", &physical, &length, nullptr, 0) != 0) return std::nullopt;
+    return OverlayMemory{reserved, swap + physical};
 #else
     std::FILE* meminfo = std::fopen("/proc/meminfo", "r");
     if (meminfo == nullptr) return std::nullopt;

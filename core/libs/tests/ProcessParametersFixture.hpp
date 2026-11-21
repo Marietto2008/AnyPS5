@@ -9,8 +9,9 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__FreeBSD__)
 #include "prx/libc/include/specifics/linux/ElfTypes.hpp"
+#include "prx/libc/include/specifics/linux/MainProgram.hpp"
 #include <sys/mman.h>
 #include <unistd.h>
 #elif defined(__APPLE__)
@@ -51,7 +52,7 @@ bool Install(std::byte* process, std::size_t size) {
     DWORD restored = 0;
     VirtualProtect(target, sizeof(*target), oldProtect, &restored);
     return true;
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__FreeBSD__)
     struct Request {
         std::byte* process;
         std::size_t size;
@@ -59,7 +60,7 @@ bool Install(std::byte* process, std::size_t size) {
     } request{process, size, false};
     dl_iterate_phdr([](dl_phdr_info* image, std::size_t, void* data) {
         auto& request = *static_cast<Request*>(data);
-        if (image->dlpi_name != nullptr && image->dlpi_name[0] != '\0') return 0;
+        if (!MainProgramImage(*image)) return 0;
         for (std::uint16_t index = 0; index < image->dlpi_phnum; ++index) {
             const auto& header = image->dlpi_phdr[index];
             if (header.p_type == PT_LOAD || header.p_type == PT_GNU_EH_FRAME || header.p_type < 0x60000000u) continue;

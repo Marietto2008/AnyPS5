@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libc/include/specifics/freebsd/Compat.hpp"
 #include "prx/libSceAgcDriver/Execution/include/HandoffSpin.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Mutex.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTrace.hpp"
@@ -68,6 +69,8 @@
 #ifdef __APPLE__
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#include <sys/mman.h>
+#elif defined(__FreeBSD__)
 #include <sys/mman.h>
 #endif
 #endif
@@ -858,7 +861,7 @@ void ForgetInaccessiblePages(std::uintptr_t address, std::size_t bytes) {
     Pages().forgetInaccessible(address, bytes);
 }
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__FreeBSD__)
 int mainImageExtent(dl_phdr_info* info, std::size_t, void* data) {
     constexpr auto mask = static_cast<std::uintptr_t>(PageBytes - 1);
     auto& span = *static_cast<PageSpan*>(data);
@@ -900,7 +903,7 @@ void PageStates::initialize() {
             image.size = cursor - start;
             imageCached = image.allocate();
         }
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__FreeBSD__)
         static const bool noImageCache = std::getenv("APS5_NO_IMAGE_PAGE_CACHE") != nullptr;
         if (!noImageCache) {
             dl_iterate_phdr(mainImageExtent, &image);
@@ -1044,6 +1047,54 @@ bool describePages(std::uintptr_t address, std::size_t bytes, Emit&& emit) {
             cursor = next;
             continue;
         }
+#elif defined(__FreeBSD__)
+        {
+            // No /proc/self/maps on FreeBSD: the covering (or next) mapping from kern.proc.vmmap.
+            const auto mapping = HostMapping::CoveringOrNext(cursor, "guest page query");
+            if (!mapping) {
+                static_cast<void>(emit(PageRun{cursor, end, false, false}));
+                return true;
+            }
+            if (mapping->start > cursor) {
+                const auto gapEnd = std::min<std::uintptr_t>(end, mapping->start);
+                recordRun(gapEnd, false, false);
+                if (!emit(PageRun{cursor, gapEnd, false, false})) return true;
+                cursor = gapEnd;
+                continue;
+            }
+            bool readable = mapping->readable;
+            bool writable = readable && mapping->writable;
+            auto next = std::min<std::uintptr_t>(end, mapping->end);
+            // The watch narrows the host protection in two ways only: it write-protects a page it watches, and it takes
+            // every access from a page it read-traps. Where the host is narrower than the watch's record for either
+            // reason, the record is the guest's protection; where it is narrower otherwise (an mprotect the watch was
+            // not told about) or wider (a reserve committed in place), the host protection stands.
+            std::uintptr_t watchedEnd = next;
+            const int logical = GuestWriteWatch::GuestWriteWatchProtection_nid_postfix(cursor, next, &watchedEnd);
+            if (logical >= 0) {
+                std::pair<std::uintptr_t, std::uintptr_t> trap{};
+                GuestWriteWatch::GuestWriteWatchReadTraps_nid_postfix(cursor, next - cursor, [](void* context, std::uintptr_t begin, std::uintptr_t end) {
+                    auto& first = *static_cast<std::pair<std::uintptr_t, std::uintptr_t>*>(context);
+                    if (first.second == 0) first = {begin, end};
+                }, &trap);
+                bool trapped = false;
+                if (trap.second != 0) {
+                    if (trap.first > cursor) next = std::min<std::uintptr_t>(next, trap.first);
+                    else {
+                        trapped = true;
+                        next = std::min<std::uintptr_t>(next, trap.second);
+                    }
+                }
+                const bool hostReadable = readable;
+                readable = hostReadable || (trapped && (logical & PROT_READ) != 0);
+                writable = readable && (mapping->writable || ((hostReadable || trapped) && (logical & PROT_WRITE) != 0));
+            }
+            if (watchedEnd > cursor && watchedEnd < next) next = watchedEnd;
+            recordRun(next, readable, writable);
+            if (!emit(PageRun{cursor, next, readable, writable})) return true;
+            cursor = next;
+            continue;
+        }
 #endif
         std::ifstream maps("/proc/self/maps");
         if (!maps.is_open()) return false;
@@ -1117,7 +1168,7 @@ bool onOwnLiveStack(std::uintptr_t address, std::size_t bytes) {
     return bounds.high != 0 && frame >= bounds.low && frame < bounds.high && address >= frame && address < bounds.high && bytes <= bounds.high - address;
 }
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__FreeBSD__)
 bool pageStateRecorded(std::uintptr_t address, std::size_t bytes) {
     auto& pages = Pages();
     pages.initialize();
@@ -1131,10 +1182,18 @@ bool readableWithoutQuery(std::uintptr_t address, std::size_t bytes) {
     constexpr std::size_t limit = 4096;
     if (bytes > limit || HostMapping::QueryFd() >= 0 || pageStateRecorded(address, bytes)) return false;
     thread_local std::array<std::byte, limit> scratch;
+#if defined(__FreeBSD__)
+    // No process_vm_readv: a trial read through libc's checked copy answers the same question.
+    const int savedErrno = errno;
+    const bool copied = GuestCopyInUnsynced_nid_no_patch(scratch.data(), reinterpret_cast<const void*>(address), bytes);
+    errno = savedErrno;
+    return copied;
+#else
     iovec local{scratch.data(), bytes};
     iovec remote{reinterpret_cast<void*>(address), bytes};
     static const pid_t self = getpid();
     return ::process_vm_readv(self, &local, 1, &remote, 1, 0) == static_cast<ssize_t>(bytes);
+#endif
 }
 #endif
 
@@ -1143,7 +1202,7 @@ bool readableWithoutQuery(std::uintptr_t address, std::size_t bytes) {
 bool checkAccess(std::uintptr_t address, std::size_t bytes, bool writable, std::string* reason) {
     const TimedAccess timed(CounterVerify, bytes);
     if (onOwnLiveStack(address, bytes)) return true;
-#ifdef __linux__
+#if defined(__linux__) || defined(__FreeBSD__)
     if (!writable && readableWithoutQuery(address, bytes)) return true;
 #endif
     bool accessible = true;
@@ -1292,7 +1351,7 @@ std::vector<std::uint64_t> PagesOf(std::span<const std::pair<std::uint64_t, std:
 
 std::vector<std::uint8_t> TrappedPages(std::span<const std::uint64_t> pages) {
     std::vector<std::uint8_t> trapped(pages.size(), 0);
-#ifdef __APPLE__
+#if defined(APS5_PROTECTION_WRITE_WATCH)
     std::vector<std::pair<std::uintptr_t, std::uintptr_t>> runs;
     for (std::size_t from = 0; from < pages.size();) {
         auto to = from + 1;
@@ -2843,7 +2902,17 @@ std::uint64_t storeOwn(std::uint64_t address, std::size_t bytes, bool imaged, co
         window = WindowCopy{first, {}, image, StampKind::Driver};
     }
     if (!walkWrites(tracker, first, stop, StampKind::Cpu)) return stampStored(tracker, store({}));
-    const auto stored = store(image.empty() ? std::span<std::byte>{} : std::span<std::byte>(image).subspan(static_cast<std::size_t>(address - first), bytes));
+    const auto stored = [&] {
+#if defined(APS5_PROTECTION_WRITE_WATCH)
+        // The driver walk below takes [first, stop) for this store: pages the store's faults open ahead must end there.
+        GuestWriteWatch::GuestWriteWatchBeginOwnStore_nid_postfix(first, stop - first);
+        struct EndOwnStore {
+            std::uint64_t first, stop;
+            ~EndOwnStore() { GuestWriteWatch::GuestWriteWatchEndOwnStore_nid_postfix(first, stop - first); }
+        } endOwnStore{first, stop};
+#endif
+        return store(image.empty() ? std::span<std::byte>{} : std::span<std::byte>(image).subspan(static_cast<std::size_t>(address - first), bytes));
+    }();
     walkWrites(tracker, first, stop, StampKind::Driver, false, window ? &*window : nullptr);
     return stampStored(tracker, stored);
 }
@@ -3836,7 +3905,7 @@ Compare CompareMapped(std::uint64_t address, std::span<const std::byte> bytes) {
 Compare CopyMapped(std::uint64_t address, std::span<std::byte> out) {
     if (out.empty()) return Compare::Equal;
     if (address == 0 || out.size() > std::numeric_limits<std::uintptr_t>::max() - address) return Compare::Unmapped;
-#if defined(_WIN32) || defined(__linux__) || defined(__APPLE__)
+#if defined(_WIN32) || defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__)
     const int savedErrno = errno;
     const bool copied = GuestCopyInUnsynced_nid_no_patch(out.data(), reinterpret_cast<const void*>(address), out.size());
     errno = savedErrno;

@@ -26,6 +26,9 @@
 
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/ApplicationHeap.hpp"
+#if defined(APS5_LLVM_DEMANGLE)
+#include <llvm/Demangle/Demangle.h>
+#endif
 
 extern "C" {
 
@@ -38,10 +41,16 @@ void* APS5_VABI __cxa_demangle_nid_postfix(const char* mangled, char* buf, std::
     std::size_t capacity = 0;
     if (buf != nullptr && !GuestCopyIn_nid_no_patch(&capacity, len, sizeof(capacity))) return report(-3);
 
+#if defined(APS5_LLVM_DEMANGLE)
+    // libcxxrt would demangle a prefix and drop the rest; LLVM's demangler, as the guest's, rejects the name.
+    std::unique_ptr<char, decltype(&std::free)> nativeResult(llvm::itaniumDemangle(mangled), &std::free);
+    if (!nativeResult) return report(-2);
+#else
     int nativeStatus = 0;
     std::unique_ptr<char, decltype(&std::free)> nativeResult(
         abi::__cxa_demangle(mangled, nullptr, nullptr, &nativeStatus), &std::free);
     if (!nativeResult) return report(nativeStatus);
+#endif
 
     const std::size_t required = std::strlen(nativeResult.get()) + 1;
     char* result = buf;

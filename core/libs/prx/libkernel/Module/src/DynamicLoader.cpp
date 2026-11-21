@@ -1,6 +1,7 @@
 #include "prx/libkernel/include/Api.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
+#include "prx/libc/include/specifics/freebsd/Compat.hpp"
 #include "prx/libkernel/Module/ModuleArgs.hpp"
 #include <nid/NidCompute.hpp>
 #include <algorithm>
@@ -31,7 +32,7 @@
 #include <mach-o/loader.h>
 #else
 #include <link.h>
-#ifdef __linux__
+#if defined(__linux__) || defined(__FreeBSD__)
 #include <unistd.h>
 #endif
 #endif
@@ -227,7 +228,7 @@ char* APS5_VABI dlerror_nid_postfix() {
     pendingError = false;
     return LoaderError().data();
 }
-#ifdef __linux__
+#if defined(__linux__) || defined(__FreeBSD__)
 static void InitializeLinuxGuestModule(void* native) {
     auto* table = static_cast<std::uint64_t*>(::dlsym(native, "__aps5_guest_lifecycle_nid_no_patch"));
     if (!table) return;
@@ -505,7 +506,7 @@ void* APS5_VABI dlopen_nid_postfix(const char* path, int flags) {
             return nullptr;
         }
         module->owned = path != nullptr;
-#ifdef __linux__
+#if defined(__linux__) || defined(__FreeBSD__)
         if (path) InitializeLinuxGuestModule(module->native);
 #endif
 #ifdef __APPLE__
@@ -611,6 +612,11 @@ std::int32_t ModuleIdForImage_nid_no_patch(const void* native) {
     std::lock_guard lock(modulesMutex);
     for (const auto& [handle, module] : modules) {
         if (module->native == native) return static_cast<std::int32_t>(handle);
+#if defined(__FreeBSD__)
+        // FreeBSD's dlopen handle is rtld's object, not its link_map (glibc's handle is the link_map itself).
+        link_map* map = nullptr;
+        if (module->native != nullptr && ::dlinfo(module->native, RTLD_DI_LINKMAP, &map) == 0 && map == native) return static_cast<std::int32_t>(handle);
+#endif
     }
     const auto [found, inserted] = imageIds.emplace(native, nextHandle);
     if (inserted) ++nextHandle;

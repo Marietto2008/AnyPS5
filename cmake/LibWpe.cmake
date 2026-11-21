@@ -22,7 +22,7 @@ function(add_bundled_libwpe_key_unicode)
         POSITION_INDEPENDENT_CODE ON
         C_VISIBILITY_PRESET hidden
     )
-    if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
         target_link_options(wpe_key_unicode INTERFACE LINKER:--exclude-libs,libwpe_key_unicode.a)
     endif()
 endfunction()

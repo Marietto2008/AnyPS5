@@ -28,6 +28,17 @@ extern const void* const _ZTVSt12system_error_nid_postfix[5];
 
 namespace {
 
+// The guest's std::future_error and std::system_error carry libstdc++'s names (St12future_error, St12system_error),
+// which only libstdc++'s host types match. libc++ keeps those two in std::__1, so on a libc++ host (FreeBSD, macOS)
+// they are caught as std::exception, a name every runtime shares, and the checks below read the object itself.
+#if defined(_LIBCPP_VERSION)
+using HostFutureError = std::exception;
+using HostSystemError = std::exception;
+#else
+using HostFutureError = std::future_error;
+using HostSystemError = std::system_error;
+#endif
+
 using GuestWhat = const char* (APS5_VABI *)(const void*);
 
 void* APS5_VABI TestAllocate(std::size_t size) { return std::malloc(size); }
@@ -135,7 +146,7 @@ void CheckFutureErrorDoraise() {
     std::memcpy(source.message.pointer, "promise already satisfied", 26);
     bool caught = false;
     try { sceLibcInternalFutureErrorDoraise_nid_no_patch(&source); }
-    catch (const std::future_error& error) {
+    catch (const HostFutureError& error) {
         caught = true;
         const auto* object = reinterpret_cast<const LibcException::FutureErrorObject*>(&error);
         REQUIRE(object != &source);
@@ -156,7 +167,7 @@ void CheckFutureErrorDoraise() {
     std::memcpy(inline_.message.buffer, "ns", 3);
     caught = false;
     try { sceLibcInternalFutureErrorDoraise_nid_no_patch(&inline_); }
-    catch (const std::future_error& error) {
+    catch (const HostFutureError& error) {
         caught = true;
         const auto* object = reinterpret_cast<const LibcException::FutureErrorObject*>(&error);
         REQUIRE(object->code.value == 4 && object->message.size == 2 && object->message.capacity == 15);
@@ -197,10 +208,10 @@ void CheckFutureCategoryMessage() {
 void CheckSystemErrorDoraise() {
     bool caught = false;
     try { _ZSt16_Throw_Cpp_errori_nid_postfix(4); }
-    catch (const std::system_error& first) {
+    catch (const HostSystemError& first) {
         const auto* source = reinterpret_cast<const LibcException::SystemErrorObject*>(&first);
         try { sceLibcInternalSystemErrorDoraise_nid_no_patch(source); }
-        catch (const std::system_error& second) {
+        catch (const HostSystemError& second) {
             caught = true;
             const auto* object = reinterpret_cast<const LibcException::SystemErrorObject*>(&second);
             REQUIRE(object != source);

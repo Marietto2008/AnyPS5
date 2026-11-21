@@ -23,6 +23,7 @@ struct Args {
     bool writeRegistry = false;
     bool toWindows = false;
     bool toMacos = false;
+    bool toFreebsd = false;
     bool lazyBinding = false;
     bool omitUnavailableDependencies = false;
     bool autorun = false;

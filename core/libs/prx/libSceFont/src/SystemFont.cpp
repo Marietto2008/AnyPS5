@@ -1,4 +1,5 @@
 #include <algorithm>
+#include "prx/libc/include/HostExecutable.hpp"
 #include <array>
 #include <cstdlib>
 #include <stdexcept>
@@ -137,6 +138,8 @@ std::filesystem::path ExecutableDirectory() {
     if (_NSGetExecutablePath(executable.data(), &size) == 0) path = std::filesystem::canonical(executable.data(), error);
     if (path.empty()) throw std::runtime_error("libSceFont: cannot locate the executable");
     return path.parent_path();
+#elif defined(__FreeBSD__)
+    return HostExecutable::Own("libSceFont").parent_path();
 #else
     return std::filesystem::read_symlink("/proc/self/exe").parent_path();
 #endif

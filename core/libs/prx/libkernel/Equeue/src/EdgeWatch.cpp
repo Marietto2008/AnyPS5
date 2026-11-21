@@ -9,7 +9,7 @@
 #ifdef __linux__
 #include <sys/epoll.h>
 #include <unistd.h>
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) || defined(__FreeBSD__) // kqueue
 #include <fcntl.h>
 #include <sys/event.h>
 #include <unistd.h>
@@ -46,7 +46,7 @@ bool Watch::TakeEdge() {
     return ::epoll_wait(m_descriptor, &ready, 1, 0) > 0;
 }
 
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) || defined(__FreeBSD__) // kqueue
 
 std::shared_ptr<Watch> Watch::Open(std::intptr_t hostDescriptor, std::intptr_t, bool write) {
     auto watch = std::make_shared<Watch>(-1);

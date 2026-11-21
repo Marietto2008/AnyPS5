@@ -346,7 +346,7 @@ VideoOutDriver::VideoOutDriver() {
         SDL_SetHintWithPriority(SDL_HINT_DIRECTINPUT_ENABLED, "0", SDL_HINT_DEFAULT);
         if (std::getenv("APS5_NO_WGI") != nullptr) SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_WGI, "0", SDL_HINT_DEFAULT);
 #endif
-#ifdef __linux__
+#if defined(__linux__) || defined(__FreeBSD__)
         SDL_SetHint(SDL_HINT_VIDEODRIVER, "wayland,x11");
 #endif
         if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) < 0) {

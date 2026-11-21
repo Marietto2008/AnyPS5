@@ -4,6 +4,12 @@
 #include <cstddef>
 #include <cstdint>
 
+// The write watch built on page protection and a fault handler (macOS, FreeBSD), as opposed to Linux's userfaultfd:
+// every change to the protection of watched guest memory has to go through it, and it can also trap reads.
+#if defined(__APPLE__) || defined(__FreeBSD__)
+#define APS5_PROTECTION_WRITE_WATCH 1
+#endif
+
 namespace GuestWriteWatch {
 
 extern "C" {
@@ -18,6 +24,8 @@ bool GuestWriteWatchHandleFault_nid_postfix(std::uintptr_t address);
 bool GuestWriteWatchCollect_nid_postfix(std::uintptr_t address, std::size_t bytes, void (*written)(void* context, std::uintptr_t begin, std::uintptr_t end), void* context);
 void GuestWriteWatchBeginHostWrite_nid_postfix(const void* pointer, std::size_t bytes);
 void GuestWriteWatchEndHostWrite_nid_postfix(const void* pointer, std::size_t bytes);
+void GuestWriteWatchBeginOwnStore_nid_postfix(std::uintptr_t address, std::size_t bytes);
+void GuestWriteWatchEndOwnStore_nid_postfix(std::uintptr_t address, std::size_t bytes);
 void GuestWriteWatchProtectionChanged_nid_postfix(const void* pointer, std::size_t bytes, int protection);
 int GuestWriteWatchProtect_nid_postfix(void* pointer, std::size_t bytes, int protection);
 int GuestWriteWatchProtection_nid_postfix(std::uintptr_t address, std::uintptr_t limit, std::uintptr_t* runEnd);

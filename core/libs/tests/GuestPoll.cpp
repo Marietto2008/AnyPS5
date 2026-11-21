@@ -215,10 +215,12 @@ static void TestPipes(int socket) {
     Require(poll_nid_postfix(&reader, 1, 1000) == 1 && reader.revents == (In | ReadNormal));
     GuestPollDescriptor writer{ends[1], In, -1};
     Require(poll_nid_postfix(&writer, 1, 0) == 0 && writer.revents == 0);
+#if !defined(__FreeBSD__) // FreeBSD pipes, like the PS5's, are bidirectional: either end can be polled for writing
     GuestPollDescriptor readerOut{ends[0], Out, -1};
     bool threw = false;
     try { poll_nid_postfix(&readerOut, 1, 0); } catch (const std::runtime_error&) { threw = true; }
     Require(threw);
+#endif
     GuestPollDescriptor mixed[2]{{socket, In, -1}, {ends[0], In, -1}};
     Require(poll_nid_postfix(mixed, 2, 1000) == 1 && mixed[0].revents == 0 && mixed[1].revents == In);
     char buffer[8]{};

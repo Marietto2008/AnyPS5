@@ -18,7 +18,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__FreeBSD__)
 #include "ProcessParametersFixture.hpp"
 #include <dlfcn.h>
 #elif defined(__APPLE__)
@@ -81,7 +81,7 @@ void installProcessParameters(bool present = true) {
     target->Misc.VirtualSize = sizeof(processParameterMetadata);
     DWORD restored = 0;
     VirtualProtect(target, sizeof(*target), oldProtect, &restored);
-#elif defined(__linux__) || defined(__APPLE__)
+#elif defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__)
     require(ProcessParametersFixture::Install(process.data(), process.size()));
 #endif
 }

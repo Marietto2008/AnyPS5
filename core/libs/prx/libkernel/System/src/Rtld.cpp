@@ -1,4 +1,7 @@
 #include "prx/libkernel/include/Api.hpp"
+#if defined(__linux__) || defined(__FreeBSD__)
+#include "prx/libc/include/specifics/linux/MainProgram.hpp"
+#endif
 #include <cstdint>
 #include <cstddef>
 #include <array>
@@ -9,6 +12,7 @@
 #include <string>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/specifics/freebsd/Compat.hpp"
 #include "prx/libkernel/Pthread/include/ThreadLifecycle.hpp"
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -56,7 +60,7 @@ const void* imageContaining(const void* address, bool reference, void*& handle, 
     Dl_info info{};
     link_map* image = nullptr;
     if (!dladdr1(address, &info, reinterpret_cast<void**>(&image), RTLD_DL_LINKMAP) || !image) return nullptr;
-    if (reference && image->l_name && *image->l_name) {
+    if (reference && !MainProgramMap(*image) && image->l_name && *image->l_name) {   // the main program is never unloaded
         handle = dlopen(image->l_name, RTLD_LAZY | RTLD_NOLOAD);
         if (!handle) throw std::runtime_error(std::string(caller) + ": cannot reference " + image->l_name);
     }

@@ -6,7 +6,7 @@
 #include "prx/libc/src/specifics/x86_64/RegisterContext.cpp"
 #include <cstdio>
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
 #include <dlfcn.h>
 #endif
 #ifdef _WIN32
@@ -34,7 +34,7 @@
 #include <mach-o/loader.h>
 #endif
 
-#if defined(__linux__) || defined(_WIN32) || defined(__APPLE__)
+#if defined(__linux__) || defined(__FreeBSD__) || defined(_WIN32) || defined(__APPLE__)
 
 extern "C" _Unwind_Reason_Code __gxx_personality_v0(int, _Unwind_Action, std::uint64_t, _Unwind_Exception*, _Unwind_Context*);
 extern "C" _Unwind_Reason_Code __gcc_personality_v0(int, _Unwind_Action, std::uint64_t, _Unwind_Exception*, _Unwind_Context*);
@@ -140,7 +140,7 @@ _Unwind_Reason_Code CallPersonality(Word personality, _Unwind_Action actions, _U
 #endif
     return (actions & _UA_SEARCH_PHASE) ? _URC_FATAL_PHASE1_ERROR : _URC_FATAL_PHASE2_ERROR;
 }
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__)
 void SearchHeader(const Byte* header, Lookup& query);
 
 int FindFrame(dl_phdr_info* info, std::size_t, void* argument) {
@@ -492,7 +492,7 @@ bool CompactRules(Frame& frame, Rules& rules) {
 
 bool DecodeFrame(_Unwind_Context& context, Frame& frame) {
     Lookup query {context.registers[16] - !context.signalFrame};
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__)
 #ifdef LIBC_UNWIND_FIND_OBJECT
     if (!FindFrameFast(query))
 #endif
@@ -753,7 +753,12 @@ _Unwind_Reason_Code PhaseTwo(_Unwind_Context context, _Unwind_Exception* excepti
             } else if (context.cfa == exception->private_2) actions = _Unwind_Action(actions | _UA_HANDLER_FRAME);
             if (frame.personality) {
                 auto result = CallPersonality(frame.personality, actions, exception, &context);
-                if (result == _URC_INSTALL_CONTEXT) LibcRestoreRegisters(context.registers);
+                if (result == _URC_INSTALL_CONTEXT) {
+                    // A call that pushed its stack arguments (DW_CFA_GNU_args_size) left them below the frame's
+                    // own stack pointer: the landing pad expects them popped, as libgcc and LLVM libunwind do.
+                    context.registers[7] += context.argumentsSize;
+                    LibcRestoreRegisters(context.registers);
+                }
                 if (result != _URC_CONTINUE_UNWIND) return _URC_FATAL_PHASE2_ERROR;
             }
         }
@@ -968,7 +973,7 @@ _Unwind_Reason_Code APS5_VABI _Unwind_RaiseException_nid_postfix(_Unwind_Excepti
 }
 
 [[noreturn]] void APS5_VABI _Unwind_Resume_nid_postfix(_Unwind_Exception* exception) {
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
     if (!LibcException::Native(exception->exception_class) && !exception->private_1) {
         using Resume = void (*)(_Unwind_Exception*);
         const auto resume = reinterpret_cast<Resume>(dlsym(RTLD_NEXT, "_Unwind_Resume"));

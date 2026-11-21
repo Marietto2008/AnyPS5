@@ -1,6 +1,7 @@
 #include <elfpatcher/general/GuestModuleWriter.hpp>
 #include <elfpatcher/general/AddressDistance.hpp>
 #include <elfpatcher/general/ElfConstants.hpp>
+#include <elfpatcher/linux/LinuxOutputFlavor.hpp>
 #include <codegen/x86/Amd64OnlySubstitutionTable.hpp>
 #include <codegen/x86/StubBodyBuilder.hpp>
 #include <io/BufferUtils.hpp>
@@ -116,7 +117,7 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteLinux(const Relinker::GuestIma
     }
     std::vector<std::uint64_t> needed;
     for (const auto& dependency : dependencies) needed.push_back(addString(dependency));
-    if (needsTlsResolver) needed.push_back(addString("ld-linux-x86-64.so.2"));
+    if (needsTlsResolver && !Linux::FreeBsdOutput()) needed.push_back(addString("ld-linux-x86-64.so.2"));
     const auto addUndefinedImport = [&](const std::string& name) {
         const auto nameOffset = addString(name);
         const auto entry = symbols.size();
@@ -373,6 +374,7 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteLinux(const Relinker::GuestIma
         Io::AppendU64(bytes, header.Alignment);
     }
     std::fill_n(bytes.begin() + 7, 9, std::uint8_t{0});
+    if (Linux::FreeBsdOutput()) bytes[7] = Linux::ElfOsAbiFreeBsd;
     Io::WriteU16(bytes, 16, 3);
     Io::WriteU64(bytes, 24, 0);
     Io::WriteU64(bytes, 32, phOffset);

@@ -1,4 +1,6 @@
 #include "prx/libc/include/RunReport.hpp"
+#include "prx/libc/include/LibraryAtExit.hpp"
+#include "prx/libc/include/HostExecutable.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/HostThreadLocal.hpp"
 
@@ -34,7 +36,7 @@
 #ifdef __linux__
 #include <sys/sysinfo.h>
 #endif
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__)
 #include <sys/sysctl.h>
 #endif
 #include <climits>
@@ -295,6 +297,15 @@ SystemInfo ProbeHost() {
     if (const auto version = FormatOsVersion(name.empty() ? "Linux" : name, versionId, release_); !version.empty()) info.osVersion = version;
     struct sysinfo memory{};
     if (sysinfo(&memory) == 0) info.ramGiB = WholeGiB(static_cast<std::uint64_t>(memory.totalram) * memory.mem_unit);
+#elif defined(__FreeBSD__)
+    utsname kernel{};
+    if (uname(&kernel) == 0) info.osVersion = std::string(kernel.sysname) + " " + kernel.release;
+    unsigned long memory = 0;
+    std::size_t size = sizeof(memory);
+    if (sysctlbyname("hw.physmem", &memory, &size, nullptr, 0) == 0) info.ramGiB = WholeGiB(memory);
+    char buffer[256] = {};
+    size = sizeof(buffer);
+    if (!info.cpu && sysctlbyname("hw.model", buffer, &size, nullptr, 0) == 0) info.cpu = CollapseSpaces(buffer);
 #elif defined(__APPLE__)
     char buffer[256] = {};
     std::size_t size = sizeof(buffer);
@@ -396,6 +407,8 @@ std::vector<std::string> OsIdentityWords() {
 #if defined(__linux__)
     std::ifstream release("/etc/os-release");
     words = OsIdentityFromOsRelease(release);
+#elif defined(__FreeBSD__)
+    words.push_back("freebsd");
 #elif defined(__APPLE__)
     words.push_back("macos");
 #elif defined(_WIN32)
@@ -581,6 +594,11 @@ std::vector<std::string> CommandLineArguments() {
 #elif defined(__APPLE__)
     char** argv = *_NSGetArgv();
     for (int index = 0; index < *_NSGetArgc(); ++index) arguments.emplace_back(argv[index]);
+#elif defined(__FreeBSD__)
+    try {
+        arguments = HostExecutable::Arguments("run report");
+    } catch (const std::exception&) {
+    }
 #else
     std::ifstream file("/proc/self/cmdline", std::ios::binary);
     std::string all((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
@@ -672,6 +690,12 @@ fs::path ExecutableDirectory() {
     if (_NSGetExecutablePath(path.data(), &size) != 0) return {};
     path.resize(std::strlen(path.c_str()));
     return fs::weakly_canonical(path, error).parent_path();
+#elif defined(__FreeBSD__)
+    try {
+        return HostExecutable::Own("run report").parent_path();
+    } catch (const std::exception&) {
+        return {};
+    }
 #else
     return fs::read_symlink("/proc/self/exe", error).parent_path();
 #endif
@@ -1853,7 +1877,7 @@ bool StartRunReport() noexcept {
         }
         collector = created;
 #ifndef _WIN32
-        std::atexit(FinishAtExit);
+        LibraryAtExit(FinishAtExit);
 #endif
         return true;
     } catch (...) {

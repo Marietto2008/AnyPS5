@@ -131,6 +131,12 @@ std::pair<std::int64_t, int> Receive(std::string_view api, int descriptor) {
 void CheckReceive(std::string_view api) {
     Connection connection;
     SetOption(connection.receiver, 0x1106, 0);
+    {
+        // The race is between the readers: without TCP_NODELAY each one-byte send after the first waits for the
+        // receiver's delayed ACK (Nagle), which Linux's quick-ACK start skips and FreeBSD does not.
+        const int noDelay = 1;
+        Require(sceNetSetsockopt(connection.sender, 6, 1, &noDelay, sizeof(noDelay)) == 0, "set TCP_NODELAY");
+    }
     constexpr int readers = 8;
     for (int iteration = 0; iteration < 32; ++iteration) {
         const char byte = 'x';

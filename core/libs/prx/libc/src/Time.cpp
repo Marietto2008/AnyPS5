@@ -134,7 +134,7 @@ std::tm toHostTm(const GuestTm& guest) {
     host.tm_isdst = guest.tm_isdst;
 #ifndef _WIN32
     host.tm_gmtoff = static_cast<long>(guest.tm_gmtoff);
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__) // AnyPS5 FreeBSD tm_zone v1.3: char *tm_zone
     host.tm_zone = const_cast<char*>(guest.tm_zone);
 #else
     host.tm_zone = guest.tm_zone;
@@ -826,8 +826,11 @@ int64_t APS5_VABI libc_mktime_nid_postfix(GuestTm* timeptr) {
         host.tm_wday = -1;
     }
 #endif
+    const int callerError = errno;
     const std::time_t t = std::mktime(&host);
     if (t == static_cast<std::time_t>(-1) && host.tm_wday == -1) return -1;
+    // FreeBSD's mktime leaves EOVERFLOW from its internal search even when the conversion succeeds.
+    errno = callerError;
     const int64_t time = static_cast<int64_t>(t) + moved;
     GuestTm normalized{};
     if (localtime_s_nid_postfix(&time, &normalized) == nullptr) return -1;

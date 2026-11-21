@@ -46,7 +46,7 @@ target_sources(libSceLibreSsl3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/X509CmpTi
 target_sources(libSceLibreSsl3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/AesCcm.cpp)
 target_sources(libSceLibreSsl3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/ChaCha.cpp)
 target_link_libraries(libSceLibreSsl3 PRIVATE mbedcrypto)
-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
     target_link_options(libSceLibreSsl3 PRIVATE LINKER:--exclude-libs,ALL)
 endif()
 target_sources(libSceLibreSsl3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/X509VerifyParam.cpp)

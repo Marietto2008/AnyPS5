@@ -266,6 +266,11 @@ void fixedReadOnlyRangeMirrorTests(const Context& context, const BdaTestAccess& 
         HMODULE module = nullptr;
         GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, static_cast<LPCWSTR>(inOther), &module);
         const void* other = module;
+#elif defined(__FreeBSD__)
+        // An executable linked at a fixed address takes &malloc at its own PLT entry: look the definition up in libc.
+        void* const libc = dlopen("libc.so.7", RTLD_LAZY | RTLD_NOLOAD);
+        const void* const inOther = libc != nullptr ? dlsym(libc, "malloc") : nullptr;
+        const void* other = inOther != nullptr ? testImageBase(inOther) : nullptr;
 #else
         const auto* inOther = reinterpret_cast<const void*>(&std::malloc);
         const void* other = testImageBase(inOther);

@@ -11,6 +11,13 @@
 #include <dlfcn.h>
 #include <stdexcept>
 #include <string>
+#if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#include <sys/user.h>
+#include <unistd.h>
+#include <vector>
+#endif
 
 #ifdef ANYPS5_ENABLE_ASAN
 static constexpr std::uintptr_t GuestArenaOffset = 0x0000100000000000ull;
@@ -26,6 +33,24 @@ static Pthread initialThread = nullptr;
 #define Require(value) do { if (!(value)) { std::fprintf(stderr, "GuestMainStack failed at line %d\n", __LINE__); std::_Exit(1); } } while (false)
 
 static char Permissions(std::uintptr_t address) {
+#if defined(__FreeBSD__)
+    // No /proc/self/maps: the same answer from the kern.proc.vmmap records.
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_VMMAP, static_cast<int>(getpid())};
+    std::size_t length = 0;
+    Require(sysctl(mib, 4, nullptr, &length, nullptr, 0) == 0);
+    length += length / 3;
+    std::vector<char> buffer(length);
+    Require(sysctl(mib, 4, buffer.data(), &length, nullptr, 0) == 0);
+    for (std::size_t offset = 0; offset + sizeof(int) <= length;) {
+        const auto* entry = reinterpret_cast<const struct kinfo_vmentry*>(buffer.data() + offset);
+        if (entry->kve_structsize <= 0) break;
+        offset += static_cast<std::size_t>(entry->kve_structsize);
+        if (address < entry->kve_start || address >= entry->kve_end) continue;
+        const bool readable = (entry->kve_protection & KVME_PROT_READ) != 0;
+        return readable && (entry->kve_protection & KVME_PROT_WRITE) != 0 ? 'w' : readable ? 'r' : '-';
+    }
+    return 0;
+#else
     std::FILE* maps = std::fopen("/proc/self/maps", "r");
     Require(maps != nullptr);
     char result = 0;
@@ -40,6 +65,7 @@ static char Permissions(std::uintptr_t address) {
     }
     std::fclose(maps);
     return result;
+#endif
 }
 
 struct WorkerContext {

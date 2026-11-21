@@ -11,6 +11,7 @@
 #include "prx/libc/include/SonyCrt.hpp"
 #include "prx/libc/include/GuestArena.hpp"
 #include "prx/libc/include/GuestTime.hpp"
+#include "prx/libc/include/specifics/freebsd/Compat.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
 #include "prx/libkernel/Pthread/include/Pthread.hpp"
 #include <algorithm>
@@ -44,6 +45,13 @@
 #include <pthread.h>
 #include <sched.h>
 #include <sys/uio.h>
+#elif defined(__FreeBSD__)
+#include <dlfcn.h>
+#include <link.h>
+#include <pthread.h>
+#include <pthread_np.h>
+#include <sched.h>
+#include <sys/cpuset.h>
 #elif defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
@@ -74,6 +82,9 @@ static bool ReadGuestTime(void* destination, const void* source, std::size_t byt
     if (copied < 0 && errno != EFAULT) throw std::runtime_error("time: process_vm_readv failed with errno " + std::to_string(errno));
     errno = saved;
     return copied >= 0 && static_cast<std::size_t>(copied) == bytes;
+#elif defined(__FreeBSD__)
+    // No process_vm_readv on FreeBSD: libc's checked copy (the host read was prepared above).
+    return GuestCopyInUnsynced_nid_no_patch(destination, source, bytes);
 #elif defined(__APPLE__)
     mach_vm_size_t copied = 0;
     return ::mach_vm_read_overwrite(::mach_task_self(), reinterpret_cast<mach_vm_address_t>(source), bytes,
@@ -216,10 +227,10 @@ public:
     CurrentCpuPin() {
 #ifdef _WIN32
         previous = SetThreadAffinityMask(GetCurrentThread(), DWORD_PTR{1} << GetCurrentProcessorNumber());
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__FreeBSD__)
         const int cpu = sched_getcpu();
         if (cpu < 0 || cpu >= CPU_SETSIZE || pthread_getaffinity_np(pthread_self(), sizeof(previous), &previous) != 0) return;
-        cpu_set_t one;
+        CpuMask one;
         CPU_ZERO(&one);
         CPU_SET(cpu, &one);
         pinned = pthread_setaffinity_np(pthread_self(), sizeof(one), &one) == 0;
@@ -229,7 +240,7 @@ public:
     ~CurrentCpuPin() {
 #ifdef _WIN32
         if (previous != 0) SetThreadAffinityMask(GetCurrentThread(), previous);
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__FreeBSD__)
         if (pinned) pthread_setaffinity_np(pthread_self(), sizeof(previous), &previous);
 #endif
     }
@@ -240,8 +251,13 @@ public:
 private:
 #ifdef _WIN32
     DWORD_PTR previous = 0;
-#elif defined(__linux__)
-    cpu_set_t previous{};
+#elif defined(__linux__) || defined(__FreeBSD__)
+#if defined(__FreeBSD__)
+    using CpuMask = cpuset_t;
+#else
+    using CpuMask = cpu_set_t;
+#endif
+    CpuMask previous{};
     bool pinned = false;
 #endif
 };
@@ -271,7 +287,7 @@ static std::string DescribeCallSite(const void* caller) {
 #ifdef _WIN32
     const auto image = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
     std::snprintf(text, sizeof(text), "exe+0x%llx", static_cast<unsigned long long>(address - image));
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__FreeBSD__)
     Dl_info info{};
     link_map* map = nullptr;
     if (dladdr1(caller, &info, reinterpret_cast<void**>(&map), RTLD_DL_LINKMAP) == 0 || map == nullptr) {
@@ -281,7 +297,7 @@ static std::string DescribeCallSite(const void* caller) {
     const char* path = map->l_name;
     const char* slash = path == nullptr ? nullptr : std::strrchr(path, '/');
     const char* module = path == nullptr || *path == '\0' ? "exe" : slash == nullptr ? path : slash + 1;
-    std::snprintf(text, sizeof(text), "%s+0x%llx", module, static_cast<unsigned long long>(address - map->l_addr));
+    std::snprintf(text, sizeof(text), "%s+0x%llx", module, static_cast<unsigned long long>(address - (std::uintptr_t)map->l_addr));
 #else
     std::snprintf(text, sizeof(text), "0x%llx", static_cast<unsigned long long>(address));
 #endif
@@ -291,7 +307,7 @@ static std::string DescribeCallSite(const void* caller) {
 static unsigned long CurrentThreadIdForTrace() {
 #ifdef _WIN32
     return GetCurrentThreadId();
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__FreeBSD__)
     return static_cast<unsigned long>(gettid());
 #else
     return 0;

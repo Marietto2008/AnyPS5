@@ -20,6 +20,6 @@ target_include_directories(zarchive SYSTEM PUBLIC ${ZARCHIVE_SOURCE_DIR}/include
 target_compile_features(zarchive PUBLIC cxx_std_20)
 target_link_libraries(zarchive PRIVATE libzstd_static)
 set_target_properties(zarchive PROPERTIES POSITION_INDEPENDENT_CODE ON)
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
     target_link_options(zarchive INTERFACE LINKER:--exclude-libs,libzarchive.a:libzstd.a)
 endif()

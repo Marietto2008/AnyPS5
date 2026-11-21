@@ -28,7 +28,8 @@
 #include <windows.h>
 #else
 #include <fcntl.h>
-#ifdef __APPLE__
+// FreeBSD, like macOS, has no udmabuf: declare the ABI so the code builds; /dev/udmabuf is never opened.
+#if defined(__APPLE__) || defined(__FreeBSD__)
 struct udmabuf_create {
     std::uint32_t memfd;
     std::uint32_t flags;
@@ -57,6 +58,9 @@ constexpr unsigned long UDMABUF_CREATE_LIST = 0;
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#if defined(__FreeBSD__)
+#include "prx/libc/include/specifics/linux/HostMapping.hpp"
+#endif
 #endif
 #include <array>
 #include <vector>
@@ -761,6 +765,41 @@ const char* createHostPointerImport(const Context& context, HostImport& entry, V
         return "VK_EXT_external_memory_host";
     }
     void* const host = entry.alias != nullptr ? entry.alias : reinterpret_cast<void*>(entry.base);
+#if defined(__FreeBSD__)
+    // The FreeBSD NVIDIA driver cannot pin pages it may not write, and one such failed import leaves the device
+    // refusing almost every later vkAllocateMemory (VK_ERROR_OUT_OF_DEVICE_MEMORY). The write watch keeps watched
+    // pages read-only, so it lets go of the range first: the pages count as written and are watched again at the next
+    // collection, while the pinned pages stay pinned. Read-trapped pages (pending GPU results) and pages the guest
+    // may not write are copied instead.
+    bool readTrapped = false;
+    GuestWriteWatch::GuestWriteWatchReadTraps_nid_postfix(reinterpret_cast<std::uintptr_t>(host), entry.bytes,
+        [](void* context, std::uintptr_t, std::uintptr_t) { *static_cast<bool*>(context) = true; }, &readTrapped);
+    if (readTrapped) {
+        failure = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+        return "a range with read-trapped pages";
+    }
+    GuestWriteWatch::GuestWriteWatchBeginHostWrite_nid_postfix(host, entry.bytes);
+    struct WatchReturns {
+        void* host;
+        std::size_t bytes;
+        ~WatchReturns() { GuestWriteWatch::GuestWriteWatchEndHostWrite_nid_postfix(host, bytes); }
+    } const watchReturns{host, entry.bytes};
+    // Every caller has checked the host protection already (Accessible, privateAnonymousReadWrite, or scratch pages of
+    // its own); only where the watch narrows it can the protection after BeginHostWrite differ from that check. Each
+    // walk reads the whole of kern.proc.vmmap, milliseconds per import, so unwatched ranges skip it.
+    if (const auto first = reinterpret_cast<std::uint64_t>(host); GuestWriteWatch::GuestWriteWatchOverlaps_nid_postfix(first, entry.bytes)) {
+        std::uint64_t covered = first;
+        bool writable = true;
+        HostMapping::Walk(first, first + entry.bytes, "host import", [&](const HostMapping::Mapping& mapping) {
+            if (mapping.start > covered || !mapping.writable) writable = false;
+            covered = std::max(covered, mapping.end);
+        });
+        if (!writable || covered < first + entry.bytes) {
+            failure = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+            return "a range that is not writable throughout";
+        }
+    }
+#endif
     VkMemoryHostPointerPropertiesEXT pointer{VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
     if (const auto result = context.Function<PFN_vkGetMemoryHostPointerPropertiesEXT>("vkGetMemoryHostPointerPropertiesEXT")(context.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, host, &pointer); result != VK_SUCCESS) {
         failure = result;
@@ -768,12 +807,27 @@ const char* createHostPointerImport(const Context& context, HostImport& entry, V
     }
     const VkImportMemoryHostPointerInfoEXT import{VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT, nullptr, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, host};
     bool allocated = false;
+#if defined(__FreeBSD__)
+    const char* const step = bindImport(context, entry, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, &import, pointer.memoryTypeBits, allocated, failure, true);
+    if (step != nullptr && std::getenv("APS5_IMPORT_MAPPINGS") != nullptr) {
+        const auto first = reinterpret_cast<std::uint64_t>(host);
+        std::fprintf(stderr, "[gpu] import of %#llx+%#llx failed at %s (%d); host mappings:\n", static_cast<unsigned long long>(first), static_cast<unsigned long long>(entry.bytes), step, static_cast<int>(failure));
+        HostMapping::ForEachEntry("import diagnosis", [&](const struct kinfo_vmentry& mapping) {
+            if (mapping.kve_end > first && mapping.kve_start < first + entry.bytes)
+                std::fprintf(stderr, "[gpu]   %#llx-%#llx type %d flags %#x protection %#x resident %d\n", static_cast<unsigned long long>(mapping.kve_start), static_cast<unsigned long long>(mapping.kve_end),
+                    mapping.kve_type, mapping.kve_flags, mapping.kve_protection, mapping.kve_resident);
+            return mapping.kve_start < first + entry.bytes;
+        });
+    }
+    return step;
+#else
     return bindImport(context, entry, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, &import, pointer.memoryTypeBits, allocated, failure, true);
+#endif
 }
 
 #ifndef _WIN32
 int udmabufDevice() {
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__)
     return -1;
 #endif
     static const int device = [] {
@@ -5056,6 +5110,11 @@ bool WatchedAfterSettle(const Context& context, std::uint64_t address, std::size
 namespace {
 
 bool privateAnonymousReadWrite(std::uint64_t begin, std::uint64_t end) {
+#if defined(__FreeBSD__)
+    // No /proc/self/maps: the same question to kern.proc.vmmap.
+    const auto mapping = HostMapping::Find(begin, "host import");
+    return mapping && end <= mapping->end && mapping->readable && mapping->writable && !mapping->executable && !mapping->shared && mapping->inode == 0;
+#endif
 #ifdef PROCMAP_QUERY
     static const int mapsFile = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
     if (mapsFile >= 0) {

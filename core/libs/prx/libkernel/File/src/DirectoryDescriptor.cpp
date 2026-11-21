@@ -34,6 +34,9 @@
 #include <unistd.h>
 #ifdef __APPLE__
 #include <sys/param.h>
+#elif defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/user.h> // struct kinfo_file for F_KINFO
 #endif
 #endif
 
@@ -58,6 +61,19 @@ std::filesystem::path HostDescriptorTarget(int fd, std::error_code& error) {
         return {};
     }
     return std::filesystem::path(buffer);
+#elif defined(__FreeBSD__)
+    // No /proc/self/fd: F_KINFO reports the path the descriptor was opened with (kf_path, empty if unknown).
+    struct kinfo_file info {};
+    info.kf_structsize = KINFO_FILE_SIZE;
+    if (::fcntl(fd, F_KINFO, &info) != 0) {
+        error = std::error_code(errno, std::generic_category());
+        return {};
+    }
+    if (info.kf_path[0] == '\0') {
+        error = std::make_error_code(std::errc::no_such_file_or_directory);
+        return {};
+    }
+    return std::filesystem::path(info.kf_path);
 #else
     return std::filesystem::read_symlink(std::filesystem::path("/proc/self/fd") / std::to_string(fd), error);
 #endif

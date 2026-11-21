@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include "prx/libc/include/HostExecutable.hpp"
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -41,6 +42,8 @@ inline std::filesystem::path EntitlementsPath() {
     if (_NSGetExecutablePath(executable.data(), &size) == 0) path = std::filesystem::canonical(executable.data(), error);
     if (path.empty()) throw std::runtime_error("NpEntitlementAccess: cannot locate the executable");
     return path.parent_path() / "anyps5-entitlements.ini";
+#elif defined(__FreeBSD__)
+    return HostExecutable::Own("NpEntitlementAccess").parent_path() / "anyps5-entitlements.ini";
 #else
     return std::filesystem::read_symlink("/proc/self/exe").parent_path() / "anyps5-entitlements.ini";
 #endif

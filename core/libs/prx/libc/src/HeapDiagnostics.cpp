@@ -2,6 +2,7 @@
 #include "prx/libc/include/FileStream.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/HeapDiagnostics.hpp"
+#include "prx/libc/include/specifics/freebsd/Compat.hpp"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -49,6 +50,8 @@ unsigned long CurrentProcessId() {
 unsigned long CurrentThreadId() {
 #ifdef _WIN32
     return GetCurrentThreadId();
+#elif defined(__FreeBSD__)
+    return static_cast<unsigned long>(gettid());
 #else
     return static_cast<unsigned long>(::syscall(SYS_gettid));
 #endif

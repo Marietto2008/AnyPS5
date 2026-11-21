@@ -318,7 +318,7 @@ std::optional<Kind> Classify(int fd, const char* function) {
     if (S_ISFIFO(status.st_mode)) return Kind::Pipe;
     if (S_ISCHR(status.st_mode)) return Kind::Device;
     if (S_ISSOCK(status.st_mode)) return Kind::Socket;
-#ifdef __linux__
+#if defined(__linux__) || defined(__FreeBSD__) // both have descriptors that are none of these (eventfd, kqueue, ...)
     return std::nullopt;
 #else
     throw std::runtime_error(std::string(function) + ": descriptor " + std::to_string(fd) + " is neither a file, a directory, a pipe, a socket nor a character device");

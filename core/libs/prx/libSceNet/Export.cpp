@@ -820,7 +820,7 @@ auto native_transfer(const NativeSocketHandle& socket, int flags, bool send, TOp
 #endif
 }
 
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__) // BSD: a blocking stream send that fails loses its byte count
 template <typename TSend>
 std::int64_t send_stream_in_chunks(const NativeSocketHandle& socket, int flags, const char* data, std::size_t length, TSend sendChunk) {
     if (!socket.stream || (flags & NET_MSG_DONTWAIT) != 0 || socket.nonblock.load()) return sendChunk(data, length);
@@ -1798,7 +1798,7 @@ int64_t APS5_VABI sceNetSend(int s, const void* buf, size_t len, int flags) {
         if (it == g_socks.end()) return fail(NET_EBADF);
         socket = it->second;
     }
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__)
     const auto result = send_stream_in_chunks(*socket.native, flags, static_cast<const char*>(buf), len, [&](const char* data, std::size_t size) {
         return ::send(socket.native->value, data, size, NATIVE_SEND_FLAGS | native_message_flags(flags));
     });
@@ -1825,14 +1825,14 @@ int64_t APS5_VABI sceNetSendto(int s, const void* buf, size_t len, int flags, co
         if (it == g_socks.end()) return fail(NET_EBADF);
         socket = it->second;
     }
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__)
     std::int64_t result;
 #else
     int result;
 #endif
     if (!to) {
         if (tolen != 0) return fail(NET_EINVAL);
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__)
         result = send_stream_in_chunks(*socket.native, flags, static_cast<const char*>(buf), len, [&](const char* data, std::size_t size) {
             return ::send(socket.native->value, data, size, NATIVE_SEND_FLAGS | native_message_flags(flags));
         });
@@ -1849,7 +1849,7 @@ int64_t APS5_VABI sceNetSendto(int s, const void* buf, size_t len, int flags, co
         NativeLength destination_length = 0;
         if (!guest_to_native_address(address.data(), address_length, destination, destination_length)) return fail(NET_EINVAL);
         if (destination.ss_family != (socket.family == NET_AF_INET ? AF_INET : AF_INET6)) return fail(NET_EAFNOSUPPORT);
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__)
         result = send_stream_in_chunks(*socket.native, flags, static_cast<const char*>(buf), len, [&](const char* data, std::size_t size) {
             return ::sendto(socket.native->value, data, size, NATIVE_SEND_FLAGS | native_message_flags(flags),
                 reinterpret_cast<const sockaddr*>(&destination), destination_length);

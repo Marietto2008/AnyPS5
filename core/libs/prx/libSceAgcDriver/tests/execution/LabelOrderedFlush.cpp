@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
@@ -215,6 +216,11 @@ void RefreshAfterStore(const Surface& surface) {
 }
 
 int main(int argc, char** argv) {
+#if defined(__APPLE__) || defined(__FreeBSD__)
+    // With the protection write watch a label traps the surface's reads instead of flushing it: the GPU-ordered
+    // flush this test measures is only taken with the label read traps off.
+    if (argc <= 1) setenv("APS5_NO_LABEL_READ_TRAP", "1", 0);
+#endif
     try {
         {
             const auto device = OpenVulkanTestDevice();

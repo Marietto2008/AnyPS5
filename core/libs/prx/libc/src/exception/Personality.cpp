@@ -1,5 +1,10 @@
 #include "prx/libc/include/exceptions/Unwind.hpp"
 #include "prx/libc/include/exceptions/Runtime.hpp"
+#if defined(__FreeBSD__)
+#include <cstdlib>
+#include <dlfcn.h>
+#include <unistd.h>
+#endif
 
 extern "C" _Unwind_Reason_Code APS5_VABI __gxx_personality_v0_nid_postfix(
     int version, _Unwind_Action actions, std::uint64_t exceptionClass,
@@ -103,10 +108,41 @@ extern "C" _Unwind_Reason_Code APS5_VABI __gcc_personality_v0_nid_postfix(
 }
 
 #ifndef __APPLE__
+#if defined(__FreeBSD__)
+namespace {
+
+using HostPersonality = _Unwind_Reason_Code (*)(int, _Unwind_Action, std::uint64_t, _Unwind_Exception*, _Unwind_Context*);
+
+// libthr's pthread_exit unwinds with the host's own unwinder (it opens libgcc_s itself), whose contexts are not this
+// runtime's: those frames go to the host personality the unwinder belongs with.
+bool ForeignContext(const _Unwind_Context* context) {
+    return context != nullptr && context->cursor != UnwindCursorSlots_nid_no_patch();
+}
+
+HostPersonality HostPersonalityIn(const char* library, const char* name) {
+    void* const handle = dlopen(library, RTLD_LAZY | RTLD_NOLOAD);
+    void* const symbol = handle != nullptr ? dlsym(handle, name) : nullptr;
+    if (symbol == nullptr) {
+        static constexpr char message[] = "[libc] a host unwinder reached the guest personality and the host one is not loaded\n";
+        static_cast<void>(!write(STDERR_FILENO, message, sizeof(message) - 1));
+        std::abort();
+    }
+    return reinterpret_cast<HostPersonality>(symbol);
+}
+
+}
+#endif
+
 extern "C" _Unwind_Reason_Code __gxx_personality_v0(
     int version, _Unwind_Action actions, std::uint64_t exceptionClass,
     _Unwind_Exception* exception, _Unwind_Context* context
 ) {
+#if defined(__FreeBSD__)
+    if (ForeignContext(context)) {
+        static const HostPersonality host = HostPersonalityIn("libcxxrt.so.1", "__gxx_personality_v0");
+        return host(version, actions, exceptionClass, exception, context);
+    }
+#endif
     return __gxx_personality_v0_nid_postfix(version, actions, exceptionClass, exception, context);
 }
 
@@ -114,6 +150,12 @@ extern "C" _Unwind_Reason_Code __gcc_personality_v0(
     int version, _Unwind_Action actions, std::uint64_t exceptionClass,
     _Unwind_Exception* exception, _Unwind_Context* context
 ) {
+#if defined(__FreeBSD__)
+    if (ForeignContext(context)) {
+        static const HostPersonality host = HostPersonalityIn("libgcc_s.so.1", "__gcc_personality_v0");
+        return host(version, actions, exceptionClass, exception, context);
+    }
+#endif
     return __gcc_personality_v0_nid_postfix(version, actions, exceptionClass, exception, context);
 }
 #endif

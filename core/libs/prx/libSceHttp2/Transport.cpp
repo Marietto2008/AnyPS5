@@ -4,6 +4,7 @@
 #else
 #include <netdb.h>
 #include <netinet/in.h>
+#include <sys/socket.h> // AF_*, SOCK_STREAM: glibc pulls it in through <netdb.h>, FreeBSD does not
 #include <poll.h>
 #endif
 

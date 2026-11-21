@@ -589,13 +589,20 @@ elseif(APS5_AGC_PROFILE STREQUAL "use")
     endforeach()
 endif()
 target_include_directories(libSceAgcDriver SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/3rdparty/zstd/lib)
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
     target_link_options(libSceAgcDriver PRIVATE LINKER:--exclude-libs,libzstd.a)
 endif()
 if(APS5_ENABLE_TRACY)
     target_link_libraries(libSceAgcDriver PUBLIC TracyClient)
 endif()
-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+# GuestMemory.cpp calls backtrace(): in glibc it is part of libc, on FreeBSD (and musl) it lives in libexecinfo.
+# Without it libSceAgcDriver.prx keeps backtrace unresolved: rtld aborts the process at the first call
+# (or refuses the library outright under LD_BIND_NOW).
+find_package(Backtrace)
+if(Backtrace_FOUND AND Backtrace_LIBRARIES)
+    target_link_libraries(libSceAgcDriver PRIVATE ${Backtrace_LIBRARIES})
+endif()
+if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
     target_link_options(libSceAgcDriver PRIVATE LINKER:--exclude-libs,$<TARGET_FILE_NAME:decoder_png>)
 endif()
 

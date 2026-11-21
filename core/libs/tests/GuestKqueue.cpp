@@ -609,7 +609,7 @@ static void PipeRead() {
     Require(close_nid_postfix(kq) == 0);
 }
 
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(__FreeBSD__) // macOS and FreeBSD pipes grow while they fill: an emptied pipe has more room than a new one
 static void PipeWrite() {
     const int kq = kqueue_nid_postfix();
     int pipe[2];
@@ -1410,8 +1410,10 @@ static void Errors() {
     RequireFailure(kevent_nid_postfix(kq, nullptr, 0, events, -1, nullptr), GuestEinval);
     int pipe[2];
     Require(pipe_nid_postfix(pipe) == 0);
+#if !defined(__FreeBSD__) // FreeBSD pipes, like the PS5's, are bidirectional: either end takes either filter
     Require(Throws([kq, &pipe] { Apply(kq, Change(static_cast<std::uintptr_t>(pipe[1]), EvfiltRead, EvAdd)); }));
     Require(Throws([kq, &pipe] { Apply(kq, Change(static_cast<std::uintptr_t>(pipe[0]), EvfiltWrite, EvAdd)); }));
+#endif
     Require(close_nid_postfix(pipe[0]) == 0 && close_nid_postfix(pipe[1]) == 0);
     const KernelEvent skipped = Change(1, 0, EvAdd);
     const KernelTimespec zero{0, 0};
@@ -1925,7 +1927,7 @@ int main(int argc, char** argv) {
     ProcdescOnFiles();
     SignalEvents();
     PipeRead();
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(__FreeBSD__)
     PipeWrite();
 #endif
     FilesystemEvents();

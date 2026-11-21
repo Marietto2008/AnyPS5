@@ -244,6 +244,13 @@ void fileData(std::vector<Candidate>& maybe, const Mapping& mapping, int file, s
 }
 
 void populatedPages(std::vector<Candidate>& maybe, const Mapping& mapping) {
+#if defined(__FreeBSD__)
+    // FreeBSD has no /proc/self/pagemap, and mincore does not see swapped pages: every page of the mapping may hold
+    // data, which is the safe superset.
+    if (!maybe.empty() && maybe.back().end == mapping.begin && maybe.back().readable == mapping.readable) maybe.back().end = mapping.end;
+    else maybe.push_back({mapping.begin, mapping.end, mapping.readable});
+    return;
+#endif
     static const auto page = static_cast<std::uint64_t>(sysconf(_SC_PAGESIZE));
     const int file = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
     Require(file >= 0, "cannot open /proc/self/pagemap for a heap mirror's pages");

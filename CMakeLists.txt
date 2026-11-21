@@ -247,8 +247,20 @@ elseif(ANYPS5_ENABLE_TSAN)
     add_compile_options(-fsanitize=thread -fno-omit-frame-pointer)
     add_link_options(-fsanitize=thread)
     add_compile_definitions(ANYPS5_ENABLE_TSAN=1)
-elseif(NOT APPLE)
+elseif(NOT APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static -static-libgcc -static-libstdc++")
+endif()
+
+# AnyPS5 FreeBSD port: pthreads live in libthr, not in libc as with glibc >= 2.34. Every library and
+# executable must be linked with -pthread, otherwise executables fail on the undefined pthread_* symbols
+# of the shared libraries they link (libc, libkernel...). FreeBSD headers need nothing at compile time.
+if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+    add_link_options(-pthread)
+    # Executables are position independent, as the Linux distributions' compilers make them: no copy relocations
+    # of library data into the executable and no fixed load address (the ports clang links at 0x200000).
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+    include(CheckPIESupported)
+    check_pie_supported(LANGUAGES CXX)
 endif()
 
 if(APPLE AND NOT ANYPS5_RELINKER_ONLY)
@@ -309,6 +321,10 @@ if(BUILD_TESTING)
     add_test(NAME shader_ssa_pass_reads COMMAND shader_ssa_pass_reads_tests)
     set_tests_properties(shader_ssa_pass_reads PROPERTIES TIMEOUT 20)
     add_test_executable(pad_command_file_tests core/libs/prx/libScePad/tests/InputCommandFile.cpp)
+    if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+        find_package(Threads REQUIRED)
+        target_link_libraries(pad_command_file_tests PRIVATE Threads::Threads)
+    endif()
     target_include_directories(pad_command_file_tests PRIVATE core/libs)
     add_test(NAME pad_command_file COMMAND pad_command_file_tests)
     set_tests_properties(pad_command_file PROPERTIES TIMEOUT 20)
@@ -1020,6 +1036,12 @@ function(anyps5_add_bundled_sdl2)
     set(CMAKE_EXE_LINKER_FLAGS "")
     set(HAVE_DLOPEN OFF)
     set(HAVE_CLOCK_GETTIME OFF)
+    if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+        # SDL's dependent option allows Vulkan only on Android, Apple, Linux and Windows and forces it off elsewhere,
+        # so the X11 window has no Vulkan surface. FreeBSD loads the same libvulkan.so.1; the option's preset value
+        # (<option>_ISSET) takes the place of that test.
+        set(SDL_VULKAN_ISSET ON)
+    endif()
     add_subdirectory(3rdparty/SDL2)
 endfunction()
 
@@ -1046,7 +1068,9 @@ set(ARCHITECTURE x86_64)
 add_subdirectory(3rdparty/ffmpeg-core)
 if(MINGW)
     target_link_libraries(ffmpeg INTERFACE bcrypt ole32 user32 ws2_32)
-elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+# AnyPS5 FreeBSD port: as on Linux, keep the static FFmpeg symbols private to each library that links
+# them (lld supports --exclude-libs); otherwise they are exported and their PC32 references fail to link.
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
     target_link_options(ffmpeg INTERFACE LINKER:--exclude-libs,ALL)
 endif()
 
@@ -1082,8 +1106,27 @@ set(LIBUSB_ENABLE_UDEV OFF CACHE BOOL "" FORCE)
 if(APPLE)
     set(HAVE_PIPE2 "" CACHE INTERNAL "")
 endif()
-add_subdirectory(3rdparty/libusb-cmake EXCLUDE_FROM_ALL)
-set_target_properties(usb-1.0 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+# AnyPS5 FreeBSD system-libusb adapter v1.2
+if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+    # FreeBSD base libusb implements the libusb 1.0 compatible API.
+    # Fail at configure time if its development headers/library are absent.
+    find_path(ANYPS5_FREEBSD_LIBUSB_INCLUDE_DIR NAMES libusb.h
+        PATHS /usr/include /usr/local/include
+        PATH_SUFFIXES libusb-1.0)
+    find_library(ANYPS5_FREEBSD_LIBUSB_LIBRARY NAMES usb usb-1.0 libusb
+        PATHS /usr/lib /usr/local/lib)
+    if(NOT ANYPS5_FREEBSD_LIBUSB_INCLUDE_DIR OR NOT ANYPS5_FREEBSD_LIBUSB_LIBRARY)
+        message(FATAL_ERROR "FreeBSD libusb not found (header libusb.h and library libusb). Check FreeBSD base headers and libraries.")
+    endif()
+    add_library(usb-1.0 INTERFACE)
+    add_library(libusb::usb-1.0 ALIAS usb-1.0)
+    target_include_directories(usb-1.0 INTERFACE "${ANYPS5_FREEBSD_LIBUSB_INCLUDE_DIR}")
+    target_link_libraries(usb-1.0 INTERFACE "${ANYPS5_FREEBSD_LIBUSB_LIBRARY}")
+    message(STATUS "AnyPS5 FreeBSD: using system libusb: ${ANYPS5_FREEBSD_LIBUSB_LIBRARY}")
+else()
+    add_subdirectory(3rdparty/libusb-cmake EXCLUDE_FROM_ALL)
+    set_target_properties(usb-1.0 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
 
 include(cmake/ZArchive.cmake)
 include(cmake/Opus.cmake)

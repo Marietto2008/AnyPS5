@@ -4,7 +4,7 @@
 extern "C" void LibcCaptureRegisters(std::uintptr_t*);
 extern "C" [[noreturn]] void LibcRestoreRegisters(const std::uintptr_t*);
 
-#if (defined(__linux__) || defined(__APPLE__)) && defined(__x86_64__)
+#if (defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__)) && defined(__x86_64__)
 asm(
 ".text\n"
 #ifdef __APPLE__

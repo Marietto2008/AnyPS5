@@ -15,7 +15,7 @@ target_include_directories(libSceNKWebKitRequirements PRIVATE ${LIBS_INCLUDE_DIR
 set_target_properties(libSceNKWebKitRequirements PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(libSceNKWebKitRequirements)
 target_link_libraries(libSceNKWebKitRequirements PRIVATE sqlite3 zlibstatic jpeg_turbo LibXml2 psl wpe_key_unicode)
-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
     target_link_options(libSceNKWebKitRequirements PRIVATE LINKER:--exclude-libs,ALL)
 endif()
 

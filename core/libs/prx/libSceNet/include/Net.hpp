@@ -248,7 +248,7 @@ using NetEventCallback = std::uint64_t (APS5_VABI*)(std::uint32_t interfaceId, s
 
 extern "C" {
 
-extern const std::uint8_t sce_net_in6addr_loopback_nid_postfix[16];
+alignas(std::uint32_t) extern const std::uint8_t sce_net_in6addr_loopback_nid_postfix[16]; // aligned as defined
 extern const std::uint8_t sce_net_in6addr_nodelocal_allnodes_nid_postfix[16];
 extern const std::uint8_t sce_net_in6addr_linklocal_allrouters_nid_postfix[16];
 extern const std::uint32_t sce_net_dummy_nid_postfix;

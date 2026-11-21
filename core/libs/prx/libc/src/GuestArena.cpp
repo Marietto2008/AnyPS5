@@ -17,6 +17,9 @@
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #endif
+#ifdef __FreeBSD__
+#include "prx/libc/include/specifics/freebsd/HostMemory.hpp"
+#endif
 #include <cstdio>
 #include <cstdlib>
 #include <iterator>
@@ -191,7 +194,7 @@ private:
         if (region == nullptr) throw std::runtime_error("guest arena: cannot reserve the guest range in WebAssembly memory");
         _base = reinterpret_cast<std::uintptr_t>(region);
         _end = _base + EmscriptenArenaBytes;
-#elif defined(__linux__) || defined(__APPLE__)
+#elif defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
         SeedHostUsedRanges();
 #elif defined(_WIN32)
         _writeWatched = std::getenv("APS5_NO_WRITE_WATCH") == nullptr;
@@ -273,9 +276,23 @@ private:
         if (result == KERN_SUCCESS) return 0;
         return result == KERN_NO_SPACE ? EEXIST : ENOMEM;
     }
+#elif defined(__FreeBSD__)
+    // FreeBSD: kern.proc.vmmap and MAP_FIXED|MAP_EXCL, see specifics/freebsd/HostMemory.hpp.
+    static std::vector<std::pair<std::uintptr_t, std::uintptr_t>> HostMappings() {
+        return FreeBsdHostMemory::Mappings();
+    }
+
+    static int ReserveNoReplace(std::uintptr_t address, std::size_t bytes) {
+        void* const wanted = reinterpret_cast<void*>(address);
+        void* const placed = FreeBsdHostMemory::MapNoReplace(wanted, bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS);
+        if (placed == wanted) return 0;
+        if (placed == MAP_FAILED) return errno;
+        munmap(placed, bytes);
+        return EINVAL;
+    }
 #endif
 
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
     void SeedHostUsedRanges() {
         for (const auto& [begin, end] : HostMappings()) {
             if (end <= ArenaStart || begin >= ApplicationAreaEnd) continue;
@@ -884,7 +901,7 @@ bool GuestArenaForgetReusableSection_nid_no_patch(void* section) {
 }
 #endif
 
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
 namespace {
 int PosixProtection(std::uint32_t windowsProtection) {
     switch (windowsProtection) {
@@ -905,10 +922,10 @@ void* PlaceAt(void* pointer, std::size_t bytes, std::uint32_t protection) {
 }
 #endif
 
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
 void GuestArenaSetProtection_nid_postfix(std::uintptr_t address, std::size_t bytes, std::uint32_t protection) {
     if (!Arena::Get().Contains(reinterpret_cast<void*>(address), bytes)) throw OutsideArena("set protection", reinterpret_cast<void*>(address), bytes);
-#ifdef __APPLE__
+#if defined(APS5_PROTECTION_WRITE_WATCH)
     if (const int error = GuestWriteWatch::GuestWriteWatchProtect_nid_postfix(reinterpret_cast<void*>(address), bytes, PosixProtection(protection)); error != 0)
         throw std::system_error(error, std::generic_category(), "guest arena protection failed");
 #else

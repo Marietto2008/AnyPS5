@@ -22,7 +22,7 @@
 #else
 #include <sys/mman.h>
 #include <unistd.h>
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__)
 #include "prx/libc/include/GuestWriteWatch.hpp"
 #endif
 #endif
@@ -284,7 +284,7 @@ static StackBounds CurrentBounds() {
 
 static void SetBounds(const StackBounds&) {}
 
-#ifdef __APPLE__
+#if defined(APS5_PROTECTION_WRITE_WATCH)
 static void PinStack(const void* context, std::uint64_t bytes) {
     GuestWriteWatch::GuestWriteWatchBeginHostWrite_nid_postfix(context, static_cast<std::size_t>(bytes));
 }
@@ -337,7 +337,10 @@ static void ReleaseHostStack(Fiber* fiber) {
 static void AllocateHostStack(Fiber* fiber) {
     const auto page = static_cast<std::uint64_t>(sysconf(_SC_PAGESIZE));
     const auto bytes = (fiber->contextSize + FIBER_HOST_STACK_MARGIN + page - 1) / page * page + page;
-    int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
+    int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+#ifdef MAP_NORESERVE
+    flags |= MAP_NORESERVE; // Linux: no swap reservation for the stack (FreeBSD has no such accounting flag)
+#endif
 #ifdef MAP_STACK
     flags |= MAP_STACK;
 #endif

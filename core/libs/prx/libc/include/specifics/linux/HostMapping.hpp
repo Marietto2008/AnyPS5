@@ -45,6 +45,11 @@ enum : std::uint64_t {
 #define PROCMAP_QUERY _IOWR('f', 17, struct procmap_query)
 #endif
 
+#if defined(__FreeBSD__)
+// No /proc/self/maps and no PROCMAP_QUERY: the same interface over kern.proc.vmmap. The procmap_query definitions
+// above stay visible because callers name them in branches that QueryFd() == -1 never takes.
+#include "prx/libc/include/specifics/freebsd/HostMapping.hpp"
+#else
 namespace HostMapping {
 
 struct Mapping {
@@ -161,5 +166,7 @@ void Walk(std::uint64_t begin, std::uint64_t end, const char* caller, Visit&& vi
 }
 
 }
+
+#endif
 
 #endif

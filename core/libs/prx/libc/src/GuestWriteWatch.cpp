@@ -39,7 +39,23 @@
 #include <unistd.h>
 #endif
 
-#if (defined(__linux__) && defined(PAGEMAP_SCAN) && defined(UFFD_FEATURE_WP_ASYNC)) || defined(__APPLE__)
+#if defined(__FreeBSD__)
+#include <atomic>
+#include <cerrno>
+#include <csignal>
+#include <cstring>
+#include <machine/trap.h>
+#include <pthread.h>
+#include <pthread_np.h>
+#include <sched.h>
+#include <semaphore.h>
+#include <sys/mman.h>
+#include <sys/ucontext.h>
+#include <unistd.h>
+#include "prx/libc/include/specifics/linux/HostMapping.hpp"
+#endif
+
+#if (defined(__linux__) && defined(PAGEMAP_SCAN) && defined(UFFD_FEATURE_WP_ASYNC)) || defined(APS5_PROTECTION_WRITE_WATCH)
 #define APS5_GUEST_WRITE_WATCH 1
 #endif
 
@@ -469,7 +485,9 @@ private:
 };
 
 const bool g_opened = (Watch::Get(), true);
-#elif defined(__APPLE__)
+#elif defined(APS5_PROTECTION_WRITE_WATCH)
+// macOS and FreeBSD: guest pages are write-protected and the fault handler records the write. The two differ only
+// in how they query a mapping, the semaphores, the fault context and how a thread is named.
 class Watch {
 public:
     static Watch& Get() {
@@ -490,15 +508,23 @@ public:
         std::vector<bool> queried(pages.size(), false);
         const Lock lock(_lock);
         for (auto cursor = begin; cursor < end;) {
+#if defined(__FreeBSD__)
+            const auto mapping = HostMapping::CoveringOrNext(cursor, "write watch");
+            if (!mapping || mapping->start >= end) break;
+            const std::uintptr_t address = mapping->start;
+            const std::uintptr_t size = mapping->end - mapping->start;
+            const std::uint8_t protection = (mapping->readable ? PROT_READ : 0) | (mapping->writable ? PROT_WRITE : 0) | (mapping->executable ? PROT_EXEC : 0);
+#else
             mach_vm_address_t address = cursor;
             mach_vm_size_t size = 0;
             vm_region_basic_info_data_64_t info{};
             mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
             mach_port_t object = MACH_PORT_NULL;
             if (mach_vm_region(mach_task_self(), &address, &size, VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&info), &count, &object) != KERN_SUCCESS || address >= end) break;
+            const std::uint8_t protection = ((info.protection & VM_PROT_READ) ? PROT_READ : 0) | ((info.protection & VM_PROT_WRITE) ? PROT_WRITE : 0) | ((info.protection & VM_PROT_EXECUTE) ? PROT_EXEC : 0);
+#endif
             const auto first = std::max<std::uintptr_t>(cursor, address);
             const auto last = std::min<std::uintptr_t>(end, address + size);
-            const std::uint8_t protection = ((info.protection & VM_PROT_READ) ? PROT_READ : 0) | ((info.protection & VM_PROT_WRITE) ? PROT_WRITE : 0) | ((info.protection & VM_PROT_EXECUTE) ? PROT_EXEC : 0);
             for (auto page = first; page < last; page += _page) {
                 pages[(page - begin) / _page] = Written | Fresh | protection;
                 queried[(page - begin) / _page] = true;
@@ -624,6 +650,27 @@ public:
         if (found != _hostWrites.end()) _hostWrites.erase(found);
     }
 
+    // A store the caller attributes to itself by collecting [begin, end) once it is done: a fault inside opens pages
+    // ahead only up to end, so no page the store opened is left for a later collect to take for a guest write.
+    void BeginOwnStore(std::uintptr_t begin, std::uintptr_t end) {
+        if (!_available || end <= begin) return;
+        begin = pageStart(begin);
+        end = pageEnd(end);
+        if (end <= begin) return;
+        const Lock lock(_lock);
+        _ownStores.emplace_back(begin, end);
+    }
+
+    void EndOwnStore(std::uintptr_t begin, std::uintptr_t end) {
+        if (!_available || end <= begin) return;
+        begin = pageStart(begin);
+        end = pageEnd(end);
+        if (end <= begin) return;
+        const Lock lock(_lock);
+        const auto found = std::find(_ownStores.begin(), _ownStores.end(), std::pair{begin, end});
+        if (found != _ownStores.end()) _ownStores.erase(found);
+    }
+
     int Protection(std::uintptr_t address, std::uintptr_t limit, std::uintptr_t* runEnd) {
         const auto page = pageStart(address);
         const Lock lock(_lock);
@@ -710,10 +757,26 @@ private:
     enum SlotState : unsigned { Free, Claimed, Queued, Running, Done };
     enum class Owner { Any, Self, Others };
 
+#if defined(__FreeBSD__)
+    // POSIX semaphores: sem_post is async-signal-safe, and the fault handler both posts and waits.
+    struct Semaphore {
+        sem_t value;
+        bool created = false;
+    };
+    static bool createSemaphore(Semaphore& semaphore) { return semaphore.created = ::sem_init(&semaphore.value, 0, 0) == 0; }
+    static void signalSemaphore(Semaphore& semaphore) { ::sem_post(&semaphore.value); }
+    static bool waitSemaphore(Semaphore& semaphore) { return ::sem_wait(&semaphore.value) == 0; }
+#else
+    using Semaphore = semaphore_t;
+    static bool createSemaphore(Semaphore& semaphore) { return semaphore_create(mach_task_self(), &semaphore, SYNC_POLICY_FIFO, 0) == KERN_SUCCESS; }
+    static void signalSemaphore(Semaphore& semaphore) { semaphore_signal(semaphore); }
+    static bool waitSemaphore(Semaphore& semaphore) { return semaphore_wait(semaphore) == KERN_SUCCESS; }
+#endif
+
     struct Slot {
         std::atomic<unsigned> state{Free};
         std::uintptr_t page = 0;
-        semaphore_t done = MACH_PORT_NULL;
+        Semaphore done{};
     };
 
     struct Resolving {
@@ -739,7 +802,9 @@ private:
         Mutex() {
             pthread_mutexattr_t attributes;
             pthread_mutexattr_init(&attributes);
+#if defined(__APPLE__)
             pthread_mutexattr_setpolicy_np(&attributes, PTHREAD_MUTEX_POLICY_FIRSTFIT_NP);
+#endif
             pthread_mutex_init(&mutex, &attributes);
             pthread_mutexattr_destroy(&attributes);
             pthread_cond_init(&idle, nullptr);
@@ -788,9 +853,16 @@ private:
 
     static bool isWriteFault(const siginfo_t* info, void* context) {
         if (info->si_code <= 0 || info->si_code >= SI_USER || context == nullptr) return false;
+#if defined(__FreeBSD__)
+        const auto& state = static_cast<ucontext_t*>(context)->uc_mcontext;   // FreeBSD embeds the mcontext
+#else
         const auto state = static_cast<ucontext_t*>(context)->uc_mcontext;
         if (state == nullptr) return false;
-#if defined(__x86_64__)
+#endif
+#if defined(__FreeBSD__) && defined(__x86_64__)
+        constexpr unsigned WriteAccess = 1u << 1;   // PGEX_W of the page fault error code
+        return state.mc_trapno == T_PAGEFLT && (state.mc_err & WriteAccess) != 0;
+#elif defined(__x86_64__)
         constexpr unsigned PageFault = 14;
         constexpr unsigned WriteAccess = 1u << 1;
         return state->__es.__trapno == PageFault && (state->__es.__err & WriteAccess) != 0;
@@ -838,7 +910,9 @@ private:
             std::size_t count = 1;
             if (_faultAhead > 1 && index >= 2 && writtenOpen(index - 1) && writtenOpen(index - 2)) {
                 const auto blockPages = static_cast<std::size_t>(((page | (FaultAheadBlock - 1)) + 1 - page) / _page);
-                const auto limit = std::min({_faultAhead, blockPages, pages.size() - index});
+                auto limit = std::min({_faultAhead, blockPages, pages.size() - index});
+                for (const auto& [first, last] : _ownStores)
+                    if (page >= first && page < last) limit = std::min<std::size_t>(limit, (last - page) / _page);
                 while (count < limit && (pages[index + count] & (Protected | ReadTrapped)) == Protected && (pages[index + count] & ProtectionMask) == protection) ++count;
             }
             if (::mprotect(reinterpret_cast<void*>(page), count * _page, protection) != 0) return false;
@@ -846,9 +920,16 @@ private:
             return true;
         }
         if ((state & PROT_WRITE) == 0) return false;
+#if defined(__FreeBSD__)
+        // Another thread opened the page meanwhile: retry the write if the page is still mapped. mincore is a plain
+        // system call, safe here, and fails with ENOMEM on an unmapped page.
+        char resident = 0;
+        return ::mincore(reinterpret_cast<const void*>(page), _page, &resident) == 0;
+#else
         std::uint8_t value = 0;
         mach_vm_size_t copied = 0;
         return mach_vm_read_overwrite(mach_task_self(), address, sizeof(value), reinterpret_cast<mach_vm_address_t>(&value), &copied) == KERN_SUCCESS && copied == sizeof(value);
+#endif
     }
 
     bool resolveTrap(std::uintptr_t address, bool write) {
@@ -881,8 +962,8 @@ private:
         }
         slot->page = page;
         slot->state.store(Queued, std::memory_order_release);
-        semaphore_signal(_wake);
-        while (semaphore_wait(slot->done) == KERN_ABORTED) {}
+        signalSemaphore(_wake);
+        while (!waitSemaphore(slot->done)) {}
         slot->state.store(Free, std::memory_order_release);
         return true;
     }
@@ -890,9 +971,9 @@ private:
     void startResolver() {
         _resolving.reserve(ResolvingCapacity);
         _deferred.reserve(ResolvingCapacity);
-        if (semaphore_create(mach_task_self(), &_wake, SYNC_POLICY_FIFO, 0) != KERN_SUCCESS) return;
+        if (!createSemaphore(_wake)) return;
         for (auto& slot : _slots)
-            if (semaphore_create(mach_task_self(), &slot.done, SYNC_POLICY_FIFO, 0) != KERN_SUCCESS) return;
+            if (!createSemaphore(slot.done)) return;
         pthread_attr_t attributes;
         pthread_attr_init(&attributes);
         pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
@@ -905,9 +986,13 @@ private:
     }
 
     void resolveLoop() {
+#if defined(__FreeBSD__)
+        pthread_setname_np(pthread_self(), "write watch read traps");
+#else
         pthread_setname_np("write watch read traps");
+#endif
         for (;;) {
-            if (semaphore_wait(_wake) != KERN_SUCCESS) continue;
+            if (!waitSemaphore(_wake)) continue;
             for (auto& slot : _slots) {
                 unsigned expected = Queued;
                 if (!slot.state.compare_exchange_strong(expected, Running, std::memory_order_acq_rel)) continue;
@@ -919,7 +1004,7 @@ private:
                     untrap(page, page + _page);
                 }
                 slot.state.store(Done, std::memory_order_release);
-                semaphore_signal(slot.done);
+                signalSemaphore(slot.done);
             }
         }
     }
@@ -1156,6 +1241,7 @@ private:
     Mutex _lock;
     std::map<std::uintptr_t, Range> _ranges;
     std::vector<std::pair<std::uintptr_t, std::uintptr_t>> _hostWrites;
+    std::vector<std::pair<std::uintptr_t, std::uintptr_t>> _ownStores;
     std::multimap<std::uintptr_t, std::uintptr_t> _traps;
     std::vector<Resolving> _resolving;
     std::vector<Resolving> _deferred;
@@ -1170,7 +1256,7 @@ private:
     std::once_flag _resolverStarted;
     std::atomic<bool> _resolverRunning{false};
     pthread_t _resolverThread{};
-    semaphore_t _wake = MACH_PORT_NULL;
+    Semaphore _wake{};
     std::array<Slot, ResolveSlots> _slots;
     struct sigaction _previousBus {};
     struct sigaction _previousSegv {};
@@ -1242,7 +1328,7 @@ bool GuestWriteWatchOverlaps_nid_postfix(std::uintptr_t address, std::size_t byt
 }
 
 bool GuestWriteWatchHandleFault_nid_postfix(std::uintptr_t address) {
-#if defined(__APPLE__)
+#if defined(APS5_PROTECTION_WRITE_WATCH)
     return Watch::Get().HandleFault(address);
 #else
     static_cast<void>(address);
@@ -1264,7 +1350,7 @@ bool GuestWriteWatchCollect_nid_postfix(std::uintptr_t address, std::size_t byte
 }
 
 void GuestWriteWatchBeginHostWrite_nid_postfix(const void* pointer, std::size_t bytes) {
-#if defined(__APPLE__)
+#if defined(APS5_PROTECTION_WRITE_WATCH)
     const auto begin = reinterpret_cast<std::uintptr_t>(pointer);
     Watch::Get().BeginHostWrite(begin, begin + bytes);
 #else
@@ -1274,7 +1360,7 @@ void GuestWriteWatchBeginHostWrite_nid_postfix(const void* pointer, std::size_t 
 }
 
 void GuestWriteWatchEndHostWrite_nid_postfix(const void* pointer, std::size_t bytes) {
-#if defined(__APPLE__)
+#if defined(APS5_PROTECTION_WRITE_WATCH)
     const auto begin = reinterpret_cast<std::uintptr_t>(pointer);
     Watch::Get().EndHostWrite(begin, begin + bytes);
 #else
@@ -1283,8 +1369,26 @@ void GuestWriteWatchEndHostWrite_nid_postfix(const void* pointer, std::size_t by
 #endif
 }
 
+void GuestWriteWatchBeginOwnStore_nid_postfix(std::uintptr_t address, std::size_t bytes) {
+#if defined(APS5_PROTECTION_WRITE_WATCH)
+    if (bytes != 0 && address + bytes > address) Watch::Get().BeginOwnStore(address, address + bytes);
+#else
+    static_cast<void>(address);
+    static_cast<void>(bytes);
+#endif
+}
+
+void GuestWriteWatchEndOwnStore_nid_postfix(std::uintptr_t address, std::size_t bytes) {
+#if defined(APS5_PROTECTION_WRITE_WATCH)
+    if (bytes != 0 && address + bytes > address) Watch::Get().EndOwnStore(address, address + bytes);
+#else
+    static_cast<void>(address);
+    static_cast<void>(bytes);
+#endif
+}
+
 void GuestWriteWatchProtectionChanged_nid_postfix(const void* pointer, std::size_t bytes, int protection) {
-#if defined(__APPLE__)
+#if defined(APS5_PROTECTION_WRITE_WATCH)
     const auto begin = reinterpret_cast<std::uintptr_t>(pointer);
     Watch::Get().ProtectionChanged(begin, begin + bytes, protection);
 #else
@@ -1295,7 +1399,7 @@ void GuestWriteWatchProtectionChanged_nid_postfix(const void* pointer, std::size
 }
 
 int GuestWriteWatchProtect_nid_postfix(void* pointer, std::size_t bytes, int protection) {
-#if defined(__APPLE__)
+#if defined(APS5_PROTECTION_WRITE_WATCH)
     const auto begin = reinterpret_cast<std::uintptr_t>(pointer);
     return Watch::Get().Protect(begin, begin + bytes, protection);
 #else
@@ -1307,7 +1411,7 @@ int GuestWriteWatchProtect_nid_postfix(void* pointer, std::size_t bytes, int pro
 }
 
 int GuestWriteWatchProtection_nid_postfix(std::uintptr_t address, std::uintptr_t limit, std::uintptr_t* runEnd) {
-#if defined(__APPLE__)
+#if defined(APS5_PROTECTION_WRITE_WATCH)
     return Watch::Get().Protection(address, limit, runEnd);
 #else
     static_cast<void>(address);
@@ -1320,7 +1424,7 @@ bool GuestWriteWatchCollectFresh_nid_postfix(std::uintptr_t address, std::size_t
 #if defined(__linux__) && defined(PAGEMAP_SCAN) && defined(UFFD_FEATURE_WP_ASYNC)
     if (bytes == 0 || address + bytes < address) return false;
     return Watch::Get().CollectFresh(address, address + bytes, written, context);
-#elif defined(__APPLE__)
+#elif defined(APS5_PROTECTION_WRITE_WATCH)
     if (bytes == 0 || address + bytes < address) return false;
     return Watch::Get().Collect(address, address + bytes, written, context, Watch::Take::Fresh);
 #else
@@ -1336,7 +1440,7 @@ bool GuestWriteWatchCollectArmed_nid_postfix(std::uintptr_t address, std::size_t
 #if defined(__linux__) && defined(PAGEMAP_SCAN) && defined(UFFD_FEATURE_WP_ASYNC)
     if (bytes == 0 || address + bytes < address) return false;
     return Watch::Get().CollectArmed(address, address + bytes, written, context);
-#elif defined(__APPLE__)
+#elif defined(APS5_PROTECTION_WRITE_WATCH)
     if (bytes == 0 || address + bytes < address) return false;
     return Watch::Get().Collect(address, address + bytes, written, context, Watch::Take::Armed);
 #else
@@ -1349,7 +1453,7 @@ bool GuestWriteWatchCollectArmed_nid_postfix(std::uintptr_t address, std::size_t
 }
 
 bool GuestWriteWatchSetReadTrapResolver_nid_postfix(void (*resolve)(std::uintptr_t begin, std::uintptr_t end)) {
-#if defined(__APPLE__)
+#if defined(APS5_PROTECTION_WRITE_WATCH)
     return Watch::Get().SetReadTrapResolver(resolve);
 #else
     static_cast<void>(resolve);
@@ -1358,7 +1462,7 @@ bool GuestWriteWatchSetReadTrapResolver_nid_postfix(void (*resolve)(std::uintptr
 }
 
 void GuestWriteWatchSetReadTrapBypass_nid_postfix(bool (*bypass)()) {
-#if defined(__APPLE__)
+#if defined(APS5_PROTECTION_WRITE_WATCH)
     Watch::Get().SetReadTrapBypass(bypass);
 #else
     static_cast<void>(bypass);
@@ -1366,7 +1470,7 @@ void GuestWriteWatchSetReadTrapBypass_nid_postfix(bool (*bypass)()) {
 }
 
 bool GuestWriteWatchTrapReads_nid_postfix(std::uintptr_t address, std::size_t bytes) {
-#if defined(__APPLE__)
+#if defined(APS5_PROTECTION_WRITE_WATCH)
     return bytes != 0 && address + bytes > address && Watch::Get().TrapReads(address, address + bytes);
 #else
     static_cast<void>(address);
@@ -1376,7 +1480,7 @@ bool GuestWriteWatchTrapReads_nid_postfix(std::uintptr_t address, std::size_t by
 }
 
 void GuestWriteWatchReadTraps_nid_postfix(std::uintptr_t address, std::size_t bytes, void (*trapped)(void* context, std::uintptr_t begin, std::uintptr_t end), void* context) {
-#if defined(__APPLE__)
+#if defined(APS5_PROTECTION_WRITE_WATCH)
     if (bytes != 0 && address + bytes > address) Watch::Get().ReadTraps(address, address + bytes, trapped, context);
 #else
     static_cast<void>(address);
@@ -1387,7 +1491,7 @@ void GuestWriteWatchReadTraps_nid_postfix(std::uintptr_t address, std::size_t by
 }
 
 void GuestWriteWatchReleaseReads_nid_postfix(std::uintptr_t address, std::size_t bytes) {
-#if defined(__APPLE__)
+#if defined(APS5_PROTECTION_WRITE_WATCH)
     if (bytes != 0 && address + bytes > address) Watch::Get().ReleaseReads(address, address + bytes);
 #else
     static_cast<void>(address);

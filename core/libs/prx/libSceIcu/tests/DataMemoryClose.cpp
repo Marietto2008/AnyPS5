@@ -13,6 +13,11 @@
 #else
 #include <sys/mman.h>
 #include <unistd.h>
+#if defined(__linux__)
+using MincoreVector = unsigned char;
+#else
+using MincoreVector = char; // FreeBSD and macOS declare mincore(const void *, size_t, char *)
+#endif
 #endif
 
 namespace UdataClose {
@@ -119,7 +124,7 @@ void Mapping() {
     guarded.data.length = static_cast<std::int32_t>(pageSize);
     udata_close_nid_postfix(&guarded.data);
 
-    unsigned char residency = 0;
+    MincoreVector residency = 0;
     errno = 0;
     Require(mincore(mapping, pageSize, &residency) == -1);
     Require(errno == ENOMEM);
@@ -159,7 +164,7 @@ void Heap() {
     data->length = static_cast<std::int32_t>(pageSize);
     udata_close_nid_postfix(data);
 
-    unsigned char residency = 0;
+    MincoreVector residency = 0;
     errno = 0;
     Require(mincore(mapping, pageSize, &residency) == -1);
     Require(errno == ENOMEM);

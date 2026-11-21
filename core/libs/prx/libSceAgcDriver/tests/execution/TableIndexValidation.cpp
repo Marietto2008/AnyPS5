@@ -370,7 +370,7 @@ void Remap(AgcDriver::VulkanDevice& device) {
     Build(device, scene);
     Settle(device, scene, "remap");
     auto* block = reinterpret_cast<std::uint8_t*>(scene.Texels(Key));
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(__FreeBSD__)
     void* fresh = mmap(nullptr, BlockBytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     Require(fresh != MAP_FAILED, "remap: cannot map the replacement block");
     Fill(static_cast<float*>(fresh), 0.0f);
@@ -381,7 +381,8 @@ void Remap(AgcDriver::VulkanDevice& device) {
         mutation.Remove(scene.textures.base);
     }
     GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(block, BlockBytes);
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__)
+    // No mremap(2) here: a fresh anonymous mapping placed over the range replaces it the same way.
     Require(mmap(block, BlockBytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == block, "remap: cannot map the replacement block over the texture");
     Fill(reinterpret_cast<float*>(block), 0.0f);
 #else

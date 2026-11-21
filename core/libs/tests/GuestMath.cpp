@@ -18,6 +18,13 @@
 #include <stdexcept>
 #include <xmmintrin.h>
 
+#ifdef FE_DENORMAL
+// FreeBSD's FE_ALL_EXCEPT also holds the denormal-operand flag, which glibc's leaves out: the checks expect the IEEE flags.
+constexpr int HostIeeeExceptions = FE_ALL_EXCEPT & ~FE_DENORMAL;
+#else
+constexpr int HostIeeeExceptions = FE_ALL_EXCEPT;
+#endif
+
 static_assert(sizeof(GuestFloatingPointEnvironment) == 32);
 extern "C" {
 
@@ -771,7 +778,7 @@ static void CheckPowfUnderflowFlag() {
         errno = 1234;
         std::feclearexcept(FE_ALL_EXCEPT);
         Require(std::bit_cast<std::uint32_t>(powf_nid_postfix(item.x, item.y)) == item.expected);
-        Require(errno == item.error && std::fetestexcept(FE_ALL_EXCEPT) == item.flags);
+        Require(errno == item.error && std::fetestexcept(HostIeeeExceptions) == item.flags);
     }
 }
 
@@ -1930,7 +1937,7 @@ static void CheckTanhSaturationEnvironment() {
                         _mm_setcsr(control | sticky);
                         const auto result = std::bit_cast<std::uint64_t>(call(std::bit_cast<double>(magnitude | sign)));
                         const unsigned csr = _mm_getcsr();
-                        const int flags = std::fetestexcept(FE_ALL_EXCEPT);
+                        const int flags = std::fetestexcept(HostIeeeExceptions);
                         const int error = errno;
                         const int expectedFlags = ((sticky & 1u) ? FE_INVALID : 0) | ((sticky & 4u) ? FE_DIVBYZERO : 0) | ((sticky & 32u) ? FE_INEXACT : 0);
                         if (result != (0x3ff0000000000000ull | sign) || csr != (control | sticky) || flags != expectedFlags || error != 1234) {
@@ -4738,7 +4745,7 @@ static void CheckTinyInverseTrigFlags() {
             errno = 1234;
             std::feclearexcept(FE_ALL_EXCEPT);
             const auto result = std::bit_cast<std::uint64_t>(function(input));
-            Require(result == bits && errno == 1234 && std::fetestexcept(FE_ALL_EXCEPT) == expected);
+            Require(result == bits && errno == 1234 && std::fetestexcept(HostIeeeExceptions) == expected);
         }
     }
 }
@@ -4797,7 +4804,7 @@ static void CheckAsinConsoleBits() {
 static void CheckRoundFlagsAndSignalingNans() {
     constexpr int Flags = FE_INVALID | FE_DIVBYZERO | FE_OVERFLOW | FE_UNDERFLOW | FE_INEXACT;
     const auto raised = [] {
-        const int flags = std::fetestexcept(FE_ALL_EXCEPT) & Flags;
+        const int flags = std::fetestexcept(HostIeeeExceptions) & Flags;
         std::feclearexcept(FE_ALL_EXCEPT);
         return flags;
     };
@@ -5356,7 +5363,7 @@ int main() {
                                   std::numeric_limits<long double>::signaling_NaN(), -std::numeric_limits<long double>::signaling_NaN()}) {
         Require(__isfinitel_nid_postfix(value) == 0);
     }
-    Require(std::fetestexcept(FE_ALL_EXCEPT) == FE_DIVBYZERO);
+    Require(std::fetestexcept(HostIeeeExceptions) == FE_DIVBYZERO);
     std::feclearexcept(FE_ALL_EXCEPT);
     Require(__isnormalf_nid_postfix(1.f) == 1 && __isnormalf_nid_postfix(0.f) == 0);
     Require(__isnormalf_nid_postfix(std::numeric_limits<float>::denorm_min()) == 0);
@@ -5386,7 +5393,7 @@ int main() {
                     if (flags != 0) std::feraiseexcept(flags);
                     errno = 12345;
                     const int result = classifiers[i](input);
-                    const int actualFlags = std::fetestexcept(FE_ALL_EXCEPT);
+                    const int actualFlags = std::fetestexcept(HostIeeeExceptions);
                     Require(result == expected[i]);
                     Require(actualFlags == flags);
                     Require(errno == 12345);
@@ -5418,7 +5425,7 @@ int main() {
                     if (flags != 0) std::feraiseexcept(flags);
                     errno = 12345;
                     const int result = classifiers[i](input);
-                    const int actualFlags = std::fetestexcept(FE_ALL_EXCEPT);
+                    const int actualFlags = std::fetestexcept(HostIeeeExceptions);
                     Require(result == expected[i]);
                     Require(actualFlags == flags);
                     Require(errno == 12345);
@@ -5450,7 +5457,7 @@ int main() {
                     const int result = classifier == 0 ? _Dclass_nid_postfix(value)
                         : classifier == 1 ? __fpclassifyd_nid_postfix(value)
                         : _Dtest_nid_postfix(&value);
-                    const int actualFlags = std::fetestexcept(FE_ALL_EXCEPT);
+                    const int actualFlags = std::fetestexcept(HostIeeeExceptions);
                     Require(result == item.code);
                     Require(actualFlags == flags);
                     Require(errno == 12345);
@@ -5482,7 +5489,7 @@ int main() {
                     const int result = classifier == 0 ? _FDclass_nid_postfix(value)
                         : classifier == 1 ? __fpclassifyf_nid_postfix(value)
                         : _FDtest_nid_postfix(&value);
-                    const int actualFlags = std::fetestexcept(FE_ALL_EXCEPT);
+                    const int actualFlags = std::fetestexcept(HostIeeeExceptions);
                     Require(result == item.code);
                     Require(actualFlags == flags);
                     Require(errno == 12345);

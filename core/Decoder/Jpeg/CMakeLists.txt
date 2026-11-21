@@ -62,7 +62,7 @@ function(add_jpeg_decoder target runtimeTarget)
             IMPORTED_LOCATION "${jpeg_turbo_library}"
             INTERFACE_INCLUDE_DIRECTORIES "${PROJECT_SOURCE_DIR}/3rdparty/libjpeg-turbo/src;${jpeg_turbo_prefix}/include"
         )
-        if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
             target_link_options(jpeg_turbo INTERFACE "LINKER:--exclude-libs,$<TARGET_FILE_NAME:jpeg_turbo>")
         endif()
         add_dependencies(jpeg_turbo jpeg_turbo_external)

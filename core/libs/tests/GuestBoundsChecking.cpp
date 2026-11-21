@@ -8,6 +8,7 @@
 #include <cstring>
 #include <fstream>
 #include <string>
+#include <vector>
 
 extern "C" {
 
@@ -54,9 +55,18 @@ int APS5_VABI CompareInts(const void* left, const void* right, void* context) {
     return (a > b) - (a < b);
 }
 
-std::basic_string<std::uint16_t> Wide(const char* text) {
-    std::basic_string<std::uint16_t> wide;
-    while (*text) wide.push_back(static_cast<unsigned char>(*text++));
+// std::basic_string<std::uint16_t> needs std::char_traits<std::uint16_t>, which libc++ 19 no longer provides.
+// The checks use only size(), data() and c_str(), so a terminated vector serves.
+struct WideText {
+    std::vector<std::uint16_t> units{0};
+    std::size_t size() const { return units.size() - 1; }
+    std::uint16_t* data() { return units.data(); }
+    const std::uint16_t* c_str() const { return units.data(); }
+};
+
+WideText Wide(const char* text) {
+    WideText wide;
+    while (*text) wide.units.insert(wide.units.end() - 1, static_cast<unsigned char>(*text++));
     return wide;
 }
 

@@ -19,6 +19,7 @@ const char* Usage() {
            "Output:\n"
            "  --windows                      Produce a Windows PE executable.\n"
            "  --macos                        Produce an x86-64 Mach-O executable; bundled modules become Mach-O libraries.\n"
+           "  --freebsd                      Produce the Linux-format ELF for FreeBSD: FreeBSD OSABI, /libexec/ld-elf.so.1.\n"
            "  --windows-diagnostics          Include startup dependency diagnostics. Requires --windows.\n"
            "  --windows-gui                  Select the Windows GUI subsystem. Requires --windows.\n"
            "  --to-intel                     Convert supported AMD-only instructions for Intel CPUs.\n"
@@ -73,7 +74,7 @@ namespace {
 
 constexpr std::string_view kVerifyRejectedOptions[] = {
     "--dry-run",
-    "--windows", "--macos", "--windows-gui", "--windows-diagnostics", "--windows-fixed-base", "--trace-imports", "--linux-fixed-base", "--macos-fixed-base",
+    "--windows", "--macos", "--freebsd", "--windows-gui", "--windows-diagnostics", "--windows-fixed-base", "--trace-imports", "--linux-fixed-base", "--macos-fixed-base",
     "--to-intel", "--to-rosetta", "--to-avx", "--frame-red-zone", "--skip-syscall-check", "--trap-sdk-syscall-stubs", "--function-symbol-roots", "unused-filter=",
     "--rpath", "--registry", "--omit-unavailable-dependencies", "--lazy-binding", "--autorun", "--patches", "--no-patches",
 };
@@ -208,6 +209,8 @@ Args ParseArgs(int argc, char* argv[]) {
             args.toWindows = true;
         } else if (arg == "--macos") {
             args.toMacos = true;
+        } else if (arg == "--freebsd") {
+            args.toFreebsd = true;
         } else if (arg == "--lazy-binding") {
             args.lazyBinding = true;
         } else if (arg == "--omit-unavailable-dependencies") {
@@ -258,6 +261,8 @@ Args ParseArgs(int argc, char* argv[]) {
 
     if (args.toWindows && args.toMacos)
         throw std::runtime_error("--windows conflicts with --macos");
+    if (args.toFreebsd && (args.toWindows || args.toMacos))
+        throw std::runtime_error("--freebsd cannot be used with --windows or --macos");
     if (args.toRosetta && args.toWindows)
         throw std::runtime_error("--to-rosetta conflicts with --windows");
     if (args.toAvx && !args.toMacos)

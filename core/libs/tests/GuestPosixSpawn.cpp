@@ -1,4 +1,5 @@
 #include "prx/libc/include/Api.hpp"
+#include "prx/libc/include/HostExecutable.hpp"
 #include "prx/libSceLibcInternal/include/Api.hpp"
 #include "prx/libSceLibcInternal/include/Spawn.hpp"
 #include "prx/libkernel/include/Api.hpp"
@@ -249,6 +250,8 @@ static std::filesystem::path OwnExecutablePath() {
     std::error_code error;
     if (_NSGetExecutablePath(executable.data(), &size) != 0) return {};
     return std::filesystem::canonical(executable.data(), error);
+#elif defined(__FreeBSD__)
+    return HostExecutable::Own("test");   // no /proc/self/exe
 #else
     std::error_code error;
     return std::filesystem::read_symlink("/proc/self/exe", error);

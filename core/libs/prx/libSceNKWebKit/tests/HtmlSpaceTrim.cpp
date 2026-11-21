@@ -102,7 +102,7 @@ int main() {
             Require(emptyImpl.refCount == 2);
             empty.impl = nullptr;
         }
-        TestWidth<unsigned char>();
+        TestWidth<char8_t>(); // the 8-bit width: libc++ 19 has no char_traits<unsigned char>, char8_t is the same unit
         TestWidth<char16_t>();
         Check<char16_t>(u" \u3000\u1234\t", u"\u3000\u1234");
     } catch (const std::exception& error) {

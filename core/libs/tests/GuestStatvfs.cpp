@@ -1,4 +1,11 @@
 #include "prx/libc/include/Api.hpp"
+#if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#include <sys/user.h>
+#include <unistd.h>
+#include <vector>
+#endif
 #include "prx/libSceLibcInternal/include/Api.hpp"
 #include "prx/libc/include/General.hpp"
 #include <array>
@@ -61,6 +68,22 @@ static std::size_t OpenHandles() {
 #ifdef _WIN32
     DWORD count = 0;
     Require(GetProcessHandleCount(GetCurrentProcess(), &count) != 0);
+    return count;
+#elif defined(__FreeBSD__)
+    // No /proc/self/fd, and /dev/fd lists only 0-2 without fdescfs: count the kern.proc.filedesc records.
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_FILEDESC, static_cast<int>(getpid())};
+    std::size_t length = 0;
+    Require(sysctl(mib, 4, nullptr, &length, nullptr, 0) == 0);
+    length += length / 3;
+    std::vector<char> buffer(length);
+    Require(sysctl(mib, 4, buffer.data(), &length, nullptr, 0) == 0);
+    std::size_t count = 0;
+    for (std::size_t offset = 0; offset + sizeof(int) <= length;) {
+        const auto* entry = reinterpret_cast<const struct kinfo_file*>(buffer.data() + offset);
+        if (entry->kf_structsize <= 0) break;
+        offset += static_cast<std::size_t>(entry->kf_structsize);
+        if (entry->kf_fd >= 0) ++count;
+    }
     return count;
 #else
 #ifdef __APPLE__

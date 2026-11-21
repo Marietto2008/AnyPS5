@@ -23,7 +23,11 @@
 #include "prx/libkernel/Equeue/Equeue.hpp"
 #include "SceTypes.hpp"
 
+#include <algorithm>
 #include <cerrno>
+#if defined(__FreeBSD__)
+#include <sys/stat.h>
+#endif
 #include <cstdarg>
 #include <limits>
 #include <memory>
@@ -301,6 +305,14 @@ static int OpenNative(const std::filesystem::path& native, int flags, std::uint1
 #else
     int fd = NativeOpen(native, MapFlags(flags), mode);
 #endif
+#if defined(__FreeBSD__)
+    // A file the open created is not in the name cache, so F_KINFO reports no path for its descriptor (EVFILT_VNODE
+    // watches and directory descriptors ask for one); a lookup of the same path enters it.
+    if (fd >= 0 && (flags & SCE_KERNEL_O_CREAT) != 0) {
+        struct stat created{};
+        static_cast<void>(::stat(native.c_str(), &created));
+    }
+#endif
 #ifdef __APPLE__
     if (fd >= 0 && (flags & (SCE_KERNEL_O_CREAT | SCE_KERNEL_O_EXCL)) == SCE_KERNEL_O_CREAT) {
         struct stat opened{};
@@ -466,6 +478,26 @@ std::int64_t APS5_VABI sceKernelRead(int d, void* buf, std::size_t nbytes) {
     return static_cast<std::int64_t>(n);
 }
 
+#if defined(__FreeBSD__)
+// FreeBSD hands a blocking pipe write of PIPE_MINDIRECT (8 KiB) or more straight to the reader, and the writer waits
+// for it; the guest's pipe buffers it. Pieces below that go through the pipe buffer.
+static auto PipeWrite(int d, const void* buf, std::size_t nbytes) -> decltype(NativeWrite(d, buf, nbytes)) {
+    constexpr std::size_t Direct = 8192;
+    constexpr std::size_t Piece = 4096;
+    struct stat status{};
+    if (nbytes < Direct || ::fstat(d, &status) != 0 || !S_ISFIFO(status.st_mode)) return NativeWrite(d, buf, nbytes);
+    std::size_t done = 0;
+    while (done < nbytes) {
+        const auto piece = std::min(nbytes - done, Piece);
+        const auto written = NativeWrite(d, static_cast<const char*>(buf) + done, piece);
+        if (written < 0) return done != 0 ? static_cast<decltype(written)>(done) : written;
+        done += static_cast<std::size_t>(written);
+        if (static_cast<std::size_t>(written) < piece) break;
+    }
+    return static_cast<decltype(NativeWrite(d, buf, nbytes))>(done);
+}
+#endif
+
 std::int64_t APS5_VABI sceKernelWrite(int d, const void* buf, std::size_t nbytes) {
     if (File::IsVirtualDirectoryDescriptor(d)) return SceErrorFromErrno(EISDIR);
     if (IsKqueueDescriptor_nid_no_patch(d)) return SCE_KERNEL_ERROR_EOPNOTSUPP;
@@ -480,7 +512,11 @@ std::int64_t APS5_VABI sceKernelWrite(int d, const void* buf, std::size_t nbytes
     }
     const File::WriteSync sync(d);
     GuestArena::GuestArenaPrepareHostRead_nid_no_patch(buf, nbytes);
+#if defined(__FreeBSD__)
+    auto n = PipeWrite(d, buf, nbytes);
+#else
     auto n = NativeWrite(d, buf, nbytes);
+#endif
     if (n < 0) return SceIoErrorFromErrno(errno);
     return static_cast<std::int64_t>(n);
 }

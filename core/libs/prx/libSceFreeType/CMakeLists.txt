@@ -71,7 +71,7 @@ if(BUILD_TESTING)
 endif()
 
 target_sources(libSceFreeType PRIVATE src/List.cpp)
-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
     target_link_options(libSceFreeType PRIVATE LINKER:--exclude-libs,ALL)
 elseif(APPLE)
     target_link_options(libSceFreeType PRIVATE LINKER:-load_hidden,$<TARGET_FILE:freetype>)

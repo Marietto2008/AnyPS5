@@ -59,7 +59,7 @@ int main() {
     Require(TooLong(below + longName + "/"), "a long component followed by a trailing slash must fail with ENAMETOOLONG (63)");
     Require(!TooLong(below + std::string(200, 'n') + "\\" + std::string(100, 'n')), "a backslash separates components here, so 200 + 100 bytes around it are accepted (FreeBSD would refuse the 301-byte name)");
     const std::string block = name255 + "/";
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(__FreeBSD__) // the host root in front of it passes the hosts' 1024-byte MAXPATHLEN
     Require(!TooLong(block + block + block + name255), "a path of exactly 1023 bytes must not be too long");
 #endif
     Require(TooLong(block + block + block + block), "a path of exactly 1024 bytes must fail with ENAMETOOLONG (63)");

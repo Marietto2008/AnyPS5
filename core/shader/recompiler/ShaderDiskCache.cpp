@@ -25,6 +25,11 @@
 #endif
 #include "ShaderCacheSourceVersion.hpp"
 #include "prx/libc/include/RemoveTree.hpp"
+#if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#include <climits>
+#endif
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -74,6 +79,13 @@ std::filesystem::path ShaderCacheDirectory() {
     std::vector<char> buffer(size);
     if (_NSGetExecutablePath(buffer.data(), &size) != 0) return {};
     const auto executable = std::filesystem::canonical(buffer.data(), error);
+#elif defined(__FreeBSD__)
+    // No /proc/self/exe: kern.proc.pathname gives the absolute path of the running executable.
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1};
+    char own[PATH_MAX];
+    std::size_t length = sizeof(own);
+    if (sysctl(mib, 4, own, &length, nullptr, 0) != 0 || length == 0) return {};
+    const std::filesystem::path executable(own);
 #else
     const auto executable = std::filesystem::read_symlink("/proc/self/exe", error);
 #endif

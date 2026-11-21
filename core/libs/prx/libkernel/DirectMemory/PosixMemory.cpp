@@ -15,10 +15,15 @@
 #include <new>
 #include <stdexcept>
 #include <system_error>
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__)
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#if defined(__FreeBSD__)
+#include "prx/libc/include/specifics/freebsd/HostMapping.hpp"
+#include <sys/auxv.h>
+#include <sys/sysctl.h>
+#endif
 #elif defined(_WIN32)
 #include "prx/libc/include/WindowsDescriptor.hpp"
 #include "prx/libkernel/File/include/RandomDevice.hpp"
@@ -52,7 +57,7 @@ constexpr std::uintptr_t GuestUserAddressEnd = 0x800000000000;
 constexpr int GuestAlignedSuper = 0x1000000;
 constexpr std::size_t SuperpageSize = std::size_t{1} << 21;
 
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__)
 class ScopedDescriptor {
 public:
     explicit ScopedDescriptor(int value) noexcept : descriptor(fcntl(value, F_DUPFD_CLOEXEC, 0)), error(descriptor < 0 ? errno : 0) {}
@@ -194,7 +199,7 @@ void* APS5_VABI mmap_nid_postfix(void* address, std::size_t length, int protecti
         rounded > static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max()) ||
         static_cast<std::uint64_t>(offset) > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) - rounded)
         return failed(GuestInvalid);
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__)
     const ScopedDescriptor pinnedDescriptor(descriptor);
     if (pinnedDescriptor.Get() < 0) return failed(pinnedDescriptor.Error());
     const int mappingDescriptor = pinnedDescriptor.Get();
@@ -271,6 +276,30 @@ int APS5_VABI munmap_nid_postfix(void* address, std::size_t length) noexcept {
     }
 }
 
+#if defined(__FreeBSD__)
+// The main thread's stack grows on demand into a reserve that FreeBSD keeps as one gap entry. An mprotect inside the
+// reserve splits that entry, and the stack can then no longer grow down to the split: grow it there first.
+static void GrowMainStackTo(std::uintptr_t start, std::uintptr_t end) {
+    unsigned long top = 0;
+    unsigned long limit = 0;
+    if (elf_aux_info(AT_USRSTACKBASE, &top, sizeof(top)) != 0 || elf_aux_info(AT_USRSTACKLIM, &limit, sizeof(limit)) != 0 || limit > top) return;
+    int guardPages = 0;
+    std::size_t length = sizeof(guardPages);
+    if (sysctlbyname("security.bsd.stack_guard_page", &guardPages, &length, nullptr, 0) != 0 || guardPages < 0) return;
+    const auto page = static_cast<std::uintptr_t>(getpagesize());
+    const auto lowest = top - limit + static_cast<std::uintptr_t>(guardPages) * page;
+    if (end <= lowest || start >= top) return;
+    const auto first = std::max(start, lowest) & ~(page - 1);
+    bool reserve = false;
+    HostMapping::ForEachEntry("stack growth", [&](const struct kinfo_vmentry& entry) {
+        if (first < entry.kve_start || first >= entry.kve_end) return entry.kve_start <= first;
+        reserve = entry.kve_type == KVME_TYPE_GUARD;
+        return false;
+    });
+    if (reserve) static_cast<void>(*reinterpret_cast<const volatile char*>(first));
+}
+#endif
+
 int APS5_VABI mprotect_nid_postfix(void* address, std::size_t length, int protection) noexcept {
     const auto failed = [](int error) {
         SetError(error);
@@ -281,6 +310,9 @@ int APS5_VABI mprotect_nid_postfix(void* address, std::size_t length, int protec
     if (start == 0 || length > std::numeric_limits<std::uintptr_t>::max() - start)
         return failed(GuestInvalid);
     try {
+#if defined(__FreeBSD__)
+        GrowMainStackTo(start, start + length);
+#endif
         if (DoMprotect(address, length, protection & GuestDefinedProtection, false) != 0) return failed(GuestInvalid);
         return 0;
     } catch (const std::bad_alloc&) {

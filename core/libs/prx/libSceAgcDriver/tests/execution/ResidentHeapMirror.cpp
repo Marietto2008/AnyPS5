@@ -17,6 +17,7 @@
 #include <windows.h>
 #else
 #include <sys/mman.h>
+#include "prx/libc/include/specifics/freebsd/LinuxMmapFlags.hpp"
 #endif
 #ifdef __APPLE__
 #include <mach/mach.h>

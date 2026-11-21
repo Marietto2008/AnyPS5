@@ -66,9 +66,12 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__)
 #include <sys/event.h>
 #include <sys/param.h>
+#endif
+#ifdef __FreeBSD__
+#include <sys/filio.h> // FIONWRITE
 #endif
 
 namespace {
@@ -121,6 +124,9 @@ int SendError(int type) {
     const int error = WSAGetLastError();
     if (type == 2 && error == WSAENOTCONN) return 39;
     if (type == 1 && (error == WSAECONNABORTED || error == WSAECONNRESET)) return 32;
+#elif defined(__FreeBSD__)
+    // A stream whose peer reset it: FreeBSD reports ECONNRESET, the guest EPIPE (as Linux does in CLOSE_WAIT).
+    if (type == 1 && (errno == ECONNRESET || errno == ECONNABORTED)) return 32;
 #else
     static_cast<void>(type);
 #endif
@@ -432,7 +438,7 @@ int Disconnect(Socket& socket) {
     socket.localAddressCleared = true;
     return 0;
 }
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__FreeBSD__)
 void LoopbackForUnspecifiedInet(sockaddr_storage& native) {
     if (native.ss_family == AF_INET) {
         auto& inet = reinterpret_cast<sockaddr_in&>(native);
@@ -1020,6 +1026,11 @@ int SocketSendFlags(Socket& socket, int flags) {
 #ifdef _WIN32
     return native;
 #else
+#if defined(__FreeBSD__)
+    // FreeBSD ends a SOCK_SEQPACKET record only at MSG_EOR (two sends otherwise arrive as one); for the guest every
+    // send is a record.
+    if (socket.type == 5) return native | MSG_EOR;
+#endif
     return LocalDatagram(socket) ? native | MSG_DONTWAIT : native;
 #endif
 }
@@ -1279,6 +1290,9 @@ bool GuestSockets::Ready(int descriptor, bool write, std::int64_t* data, bool* e
 #ifdef __linux__
         int queued = 0;
         if (*data > 0 && ::ioctl(socket->value, SIOCOUTQ, &queued) == 0) *data = std::max<std::int64_t>(0, *data - queued);
+#elif defined(__FreeBSD__)
+        int queued = 0;
+        if (*data > 0 && ::ioctl(socket->value, FIONWRITE, &queued) == 0) *data = std::max<std::int64_t>(0, *data - queued);
 #endif
     } else if (Listening(*socket)) {
         *data = ListenQueueLength(socket->value);
@@ -1331,12 +1345,14 @@ bool GuestSockets::PipeWriteState(int descriptor, std::int64_t* data, bool* eof,
     *eof = (entry.revents & POLLERR) != 0;
     *writable = (entry.revents & POLLOUT) != 0;
     *data = *eof ? 0 : std::max<std::int64_t>(0, capacity - queued);
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) || defined(__FreeBSD__) // kqueue reports the room left in the pipe
     if (!IsPipe(descriptor, 0) || (::fcntl(descriptor, F_GETFL) & O_ACCMODE) == O_RDONLY) return false;
+#ifdef __APPLE__
     char path[MAXPATHLEN];
     if (::fcntl(descriptor, F_GETPATH, path) >= 0) NotImplemented_nid_no_patch(__func__);
     if (errno != EBADF)
         throw std::runtime_error("kevent: identifying pipe descriptor " + std::to_string(descriptor) + " failed, host errno " + std::to_string(errno));
+#endif
     const int queue = ::kqueue();
     if (queue < 0)
         throw std::runtime_error("kevent: querying pipe descriptor " + std::to_string(descriptor) + " failed, host errno " + std::to_string(errno));
@@ -1794,6 +1810,9 @@ int APS5_VABI connect_nid_postfix(int descriptor, const void* address, std::uint
         reinterpret_cast<sockaddr_in6&>(native).sin6_addr = in6addr_loopback;
     if (socket->type == 1 && Multicast(native) && !PeerConnected(*socket)) return Fail(47);
     if (ZeroPortConnect(*socket, address, length)) return -1;
+#if defined(__FreeBSD__)
+    LoopbackForUnspecifiedInet(native); // FreeBSD refuses the unspecified address (ENETUNREACH); the guest means this host
+#endif
 #ifdef _WIN32
     LoopbackForUnspecifiedInet(native);
     if (socket->type == 1) {
@@ -2186,6 +2205,9 @@ std::int64_t APS5_VABI sendto_nid_postfix(int descriptor, const void* buffer, st
         if (!Address(socket->family, address, addressLength, native, size)) return socket->type == 2 && SourceFaults(buffer, length) ? Fail(14) : -1;
         if (const auto answered = ZeroPortSend(*socket, native, length); answered != NotAnswered)
             return socket->type == 2 && SourceFaults(buffer, length) ? Fail(14) : answered;
+#if defined(__FreeBSD__)
+        LoopbackForUnspecifiedInet(native);
+#endif
 #ifdef _WIN32
         LoopbackForUnspecifiedInet(native);
         if (SourceFaults(buffer, length)) return Fail(14);
@@ -2500,6 +2522,9 @@ static bool ReadGuest(void* destination, const void* source, std::size_t bytes) 
     iovec remote{const_cast<void*>(source), bytes};
     const int saved = errno;
     return Transferred(::process_vm_readv(::getpid(), &local, 1, &remote, 1, 0), bytes, "process_vm_readv", saved);
+#elif defined(__FreeBSD__)
+    // No process_vm_readv on FreeBSD: libc's checked copy (the host read was prepared above).
+    return GuestCopyInUnsynced_nid_no_patch(destination, source, bytes);
 #elif defined(__APPLE__)
     mach_vm_size_t copied = 0;
     return ::mach_vm_read_overwrite(::mach_task_self(), reinterpret_cast<mach_vm_address_t>(source), bytes,
@@ -2524,6 +2549,9 @@ static bool WriteGuest(void* destination, const void* source, std::size_t bytes)
     iovec remote{destination, bytes};
     const int saved = errno;
     return Transferred(::process_vm_writev(::getpid(), &local, 1, &remote, 1, 0), bytes, "process_vm_writev", saved);
+#elif defined(__FreeBSD__)
+    // No process_vm_writev on FreeBSD: libc's checked copy.
+    return GuestCopyOut_nid_no_patch(destination, source, bytes);
 #elif defined(__APPLE__)
     return ::mach_vm_write(::mach_task_self(), reinterpret_cast<mach_vm_address_t>(destination),
         reinterpret_cast<vm_offset_t>(source), static_cast<mach_msg_type_number_t>(bytes)) == KERN_SUCCESS;
@@ -2628,6 +2656,31 @@ std::int64_t APS5_VABI recvmsg_nid_postfix(int descriptor, GuestMsghdr* message,
                 }
             }
             if (const int error = rights.Install((flags & GuestControlCloseOnExec) != 0)) return Fail(error);
+        } else
+#endif
+#if defined(__FreeBSD__)
+        if (!shut && socket->type == 5) {
+            // FreeBSD keeps the unread rest of a SOCK_SEQPACKET record for the next receive; the guest's drops it
+            // (MSG_TRUNC). The record ends at MSG_EOR.
+            iovec vector{buffer.data(), buffer.size()};
+            msghdr host{};
+            host.msg_name = &native;
+            host.msg_namelen = size;
+            host.msg_iov = &vector;
+            host.msg_iovlen = 1;
+            const int receiveFlags = NativeReceiveFlags(flags, socket->type);
+            received = ::recvmsg(socket->value, &host, receiveFlags);
+            size = host.msg_namelen;
+            if (received > 0 && (receiveFlags & MSG_PEEK) == 0 && (host.msg_flags & MSG_EOR) == 0) {
+                std::array<char, 4096> rest;
+                for (;;) {
+                    iovec restVector{rest.data(), rest.size()};
+                    msghdr drain{};
+                    drain.msg_iov = &restVector;
+                    drain.msg_iovlen = 1;
+                    if (::recvmsg(socket->value, &drain, MSG_DONTWAIT) <= 0 || (drain.msg_flags & MSG_EOR) != 0) break;
+                }
+            }
         } else
 #endif
         if (!shut) received = ::recvfrom(socket->value, buffer.data(), static_cast<int>(buffer.size()),

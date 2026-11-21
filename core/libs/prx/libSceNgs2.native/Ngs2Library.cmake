@@ -29,7 +29,7 @@ function(add_sce_ngs2_library target)
         "$<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=off>;$<$<CXX_COMPILER_ID:MSVC>:/fp:strict>")
     target_include_directories(${target} PRIVATE ${LIBS_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/3rdparty/LibAtrac9/C/src ${CMAKE_SOURCE_DIR}/3rdparty/vgmstream/src)
     target_link_libraries(${target} PRIVATE atrac9 vgmstream_hevag libc libkernel)
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
         target_link_options(${target} PRIVATE LINKER:--exclude-libs,ALL)
     endif()
     set_target_properties(${target} PROPERTIES

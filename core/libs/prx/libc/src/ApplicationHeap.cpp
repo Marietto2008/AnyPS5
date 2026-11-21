@@ -1,4 +1,5 @@
 #include "prx/libc/include/Api.hpp"
+#include "prx/libc/include/LibraryAtExit.hpp"
 #include "prx/libc/include/ApplicationHeap.hpp"
 #include "prx/libc/include/GuestHeap.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
@@ -132,7 +133,7 @@ void finalize() {
 
 struct HeapFinalizerRegistration {
     HeapFinalizerRegistration() {
-        if (std::atexit(finalize) != 0) std::terminate();
+        if (LibraryAtExit(finalize) != 0) std::terminate();
     }
 };
 const HeapFinalizerRegistration heapFinalizerRegistration;

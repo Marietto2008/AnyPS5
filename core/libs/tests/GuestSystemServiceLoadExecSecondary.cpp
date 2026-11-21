@@ -1,4 +1,5 @@
 #include "prx/libSceSystemService/include/SystemService.hpp"
+#include "prx/libc/include/HostExecutable.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <cstdint>
 #include <cstdio>
@@ -34,6 +35,8 @@ std::filesystem::path Own() {
     std::vector<char> path(size);
     Require(_NSGetExecutablePath(path.data(), &size) == 0, "locating the test executable");
     return std::filesystem::absolute(path.data());
+#elif defined(__FreeBSD__)
+    return HostExecutable::Own("test");   // no /proc/self/exe
 #else
     return std::filesystem::read_symlink("/proc/self/exe");
 #endif

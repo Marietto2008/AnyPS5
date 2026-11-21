@@ -5,6 +5,11 @@ add_test_executable(agc_write_tracking_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(agc_write_tracking_tests PRIVATE ${LIBS_INCLUDE_DIR})
 target_link_libraries(agc_write_tracking_tests PRIVATE shader_recompiler_agc_driver libc)
+# GuestMemory.cpp calls backtrace(), which lives in libexecinfo on FreeBSD.
+find_package(Backtrace)
+if(Backtrace_FOUND AND Backtrace_LIBRARIES)
+    target_link_libraries(agc_write_tracking_tests PRIVATE ${Backtrace_LIBRARIES})
+endif()
 set_target_properties(agc_write_tracking_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_write_tracking_tests)
 

@@ -12,7 +12,16 @@ using LChar = std::uint8_t;
 
 enum HexConversionMode { Lowercase, Uppercase };
 
+#if defined(_LIBCPP_DEPRECATED_ABI_DISABLE_PAIR_TRIVIAL_COPY_CTOR)
+// FreeBSD's libc++ keeps std::pair non-trivially copyable for its pre-v1 ABI (__configuration/abi.h), which would
+// return it in memory instead of RAX:RDX as the guest expects. Same layout and member names, trivially copyable.
+struct HexResult {
+    LChar* first;
+    unsigned second;
+};
+#else
 using HexResult = std::pair<LChar*, unsigned>;
+#endif
 
 using SixCharacterHash = std::array<char, 7>;
 

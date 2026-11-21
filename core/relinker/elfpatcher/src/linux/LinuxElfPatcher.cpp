@@ -1,4 +1,5 @@
 #include <elfpatcher/linux/LinuxElfPatcher.hpp>
+#include <elfpatcher/linux/LinuxOutputFlavor.hpp>
 #include <elfpatcher/general/AddressDistance.hpp>
 #include <elfpatcher/general/ElfConstants.hpp>
 #include <elfpatcher/general/ProgramHeaderLayoutRequest.hpp>
@@ -222,6 +223,34 @@ std::uint64_t SeparateSharedLoadPages(std::vector<std::uint8_t>& buf, std::vecto
         if (load.Alignment > kDefaultLoadAlignment && (load.Alignment & (load.Alignment - 1)) == 0)
             lowered = std::max(lowered, load.Alignment);
         load.Alignment = std::min(load.Alignment, kDefaultLoadAlignment);
+    }
+    if (FreeBsdOutput()) {
+        // FreeBSD's image activator refuses a PT_LOAD whose first page a segment below already holds (that one's bss is
+        // mapped to its page end), where Linux maps the later segment over the shared page. The file bytes before an
+        // unaligned segment reproduce what the segments below put on that page (above), so on FreeBSD the segment
+        // starts at the page and the segments below end there.
+        for (std::size_t position = 0; position < loads.size(); ++position) {
+            auto& load = headers[loads[position]];
+            const auto prefix = load.MappedAddress % kDefaultLoadAlignment;
+            if (prefix == 0 || load.FileSize == 0)
+                continue;
+            const auto pageStart = load.MappedAddress - prefix;
+            bool shared = false;
+            for (std::size_t below = 0; below < position; ++below) {
+                auto& other = headers[loads[below]];
+                if (other.MappedAddress + other.MemorySize <= pageStart)
+                    continue;
+                shared = true;
+                other.MemorySize = other.MappedAddress < pageStart ? pageStart - other.MappedAddress : 0;
+                other.FileSize = std::min(other.FileSize, other.MemorySize);
+            }
+            if (!shared)
+                continue;
+            load.MappedAddress = pageStart;
+            load.Offset -= prefix;
+            load.FileSize += prefix;
+            load.MemorySize += prefix;
+        }
     }
     return lowered;
 }
@@ -467,6 +496,7 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
 
     const std::uint32_t type = _fixedBase ? ET_EXEC : ET_DYN;
     std::fill_n(buf.begin() + static_cast<std::ptrdiff_t>(kEhdrOsAbiOffset), 9, std::uint8_t{0});
+    if (FreeBsdOutput()) buf[kEhdrOsAbiOffset] = ElfOsAbiFreeBsd;
     buf[kEhdrTypeOffset] = static_cast<std::uint8_t>(type & 0xFF);
     buf[kEhdrTypeOffset + 1] = static_cast<std::uint8_t>((type >> 8) & 0xFF);
     _byteWriter->WriteU64(buf, kEhdrShOffOffset, 0);
@@ -700,7 +730,11 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
         _appendDynEntry(dynSegBuf, DT_JMPREL, address(vaddrOfExtraBlockOffset(relaPltOff)));
         _appendDynEntry(dynSegBuf, DT_PLTRELSZ, dynSection.RelaPltData.size());
         _appendDynEntry(dynSegBuf, DT_PLTREL, static_cast<std::uint64_t>(DT_RELA));
-        _appendDynEntry(dynSegBuf, DT_PLTGOT, address(originalPltGotVaddr));
+        // FreeBSD's rtld writes GOT[1] and GOT[2] whenever DT_PLTGOT is present, after the other relocations and even
+        // with BIND_NOW, where glibc leaves them alone: they are guest data (a homebrew crt keeps its init_array bounds
+        // there). Bound at load time, the table is not needed.
+        if (lazyBinding || !FreeBsdOutput())
+            _appendDynEntry(dynSegBuf, DT_PLTGOT, address(originalPltGotVaddr));
     }
     if (!lazyBinding)
         _appendDynEntry(dynSegBuf, DT_FLAGS, DF_BIND_NOW);
@@ -777,9 +811,11 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
     for (const auto& site : trampolines)
         _appendTrampoline(buf, site, extraBlockOff, vaddrOfExtraBlockOffset);
 
-    static constexpr char kInterp[] = "/lib64/ld-linux-x86-64.so.2";
+    static constexpr char kLinuxInterp[] = "/lib64/ld-linux-x86-64.so.2";
+    static constexpr char kFreeBsdInterp[] = "/libexec/ld-elf.so.1";
+    const std::string_view kInterp = FreeBsdOutput() ? std::string_view(kFreeBsdInterp, sizeof(kFreeBsdInterp)) : std::string_view(kLinuxInterp, sizeof(kLinuxInterp));
     const auto interpOff = static_cast<std::uint64_t>(buf.size());
-    constexpr std::uint64_t interpSize = sizeof(kInterp);
+    const std::uint64_t interpSize = kInterp.size();
     for (char i : kInterp)
         buf.push_back(static_cast<std::uint8_t>(i));
 

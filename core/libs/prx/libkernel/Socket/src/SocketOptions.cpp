@@ -327,7 +327,12 @@ int GetSocketLevelOption(std::uintptr_t native, SocketOptionState& state, int fa
 #else
         if (::getsockopt(handle, SOL_SOCKET, SO_LINGER, reinterpret_cast<NativeOptionOutput>(&current), &size)) return HostError();
 #endif
+#if defined(__FreeBSD__)
+        // FreeBSD keeps the linger time in 16 bits (so_linger is a short): read back unsigned, as set.
+        const LingerValue guest{current.l_onoff != 0 ? GuestLinger : 0, static_cast<std::int32_t>(static_cast<std::uint16_t>(current.l_linger))};
+#else
         const LingerValue guest{current.l_onoff != 0 ? GuestLinger : 0, static_cast<std::int32_t>(current.l_linger)};
+#endif
         return Copy(value, length, &guest, sizeof(guest));
     }
     if (option == GuestSendTimeout || option == GuestReceiveTimeout) {

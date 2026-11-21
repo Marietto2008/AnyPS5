@@ -17,7 +17,7 @@
 #include <vector>
 #ifdef _WIN32
 #include <windows.h>
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__FreeBSD__)
 #include <fcntl.h>
 #include <unistd.h>
 extern char** environ;
@@ -146,8 +146,13 @@ Handle Duplicate(HANDLE source, DWORD access) {
     parent.reset();
     LibcTerminate_nid_no_patch(0);
 }
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__FreeBSD__)
 [[noreturn]] void Replace(const std::filesystem::path& target, const std::vector<std::string>& arguments) {
+#if defined(__FreeBSD__)
+    constexpr unsigned char hostOsAbi = 9;   // ELFOSABI_FREEBSD, what relinker --freebsd writes
+#else
+    constexpr unsigned char hostOsAbi = 3;   // ELFOSABI_GNU
+#endif
     const int descriptor = open(target.c_str(), O_RDONLY | O_CLOEXEC);
     if (descriptor < 0) throw std::system_error(errno, std::generic_category(), "LoadExec: opening the converted executable");
     const auto close = [](int* fd) { ::close(*fd); delete fd; };
@@ -155,8 +160,8 @@ Handle Duplicate(HANDLE source, DWORD access) {
     std::array<unsigned char, 20> header{};
     if (pread(descriptor, header.data(), header.size(), 0) != static_cast<ssize_t>(header.size()) ||
         header[0] != 0x7f || header[1] != 'E' || header[2] != 'L' || header[3] != 'F' ||
-        header[4] != 2 || header[5] != 1 || (header[7] != 0 && header[7] != 3) || header[17] != 0 || (header[16] != 2 && header[16] != 3) || header[18] != 62 || header[19] != 0 || access(target.c_str(), X_OK) != 0)
-        throw std::runtime_error("LoadExec: target is not an executable x86-64 Linux ELF");
+        header[4] != 2 || header[5] != 1 || (header[7] != 0 && header[7] != hostOsAbi) || header[17] != 0 || (header[16] != 2 && header[16] != 3) || header[18] != 62 || header[19] != 0 || access(target.c_str(), X_OK) != 0)
+        throw std::runtime_error("LoadExec: target is not an executable x86-64 ELF for this host");
     std::vector<char*> pointers;
     for (const auto& argument : arguments) pointers.push_back(const_cast<char*>(argument.c_str()));
     pointers.push_back(nullptr);
@@ -209,7 +214,7 @@ Handle Duplicate(HANDLE source, DWORD access) {
 }
 
 extern "C" bool LoadConvertedExecutable_nid_no_patch(const std::filesystem::path& target, const char* const* arguments) {
-#if defined(_WIN32) || defined(__linux__) || defined(__APPLE__)
+#if defined(_WIN32) || defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__)
     if (!arguments || !arguments[0]) return false;
     std::vector<std::string> copied;
     for (std::size_t index = 0; arguments[index]; ++index) copied.emplace_back(arguments[index]);

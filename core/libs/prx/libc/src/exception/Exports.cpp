@@ -36,6 +36,14 @@ GCC_GLOBAL_ALIAS(_Unwind_Resume, _Unwind_Resume_nid_postfix);
 GCC_GLOBAL_ALIAS(_Unwind_RaiseException, _Unwind_RaiseException_nid_postfix);
 GCC_GLOBAL_ALIAS(_Unwind_Resume_or_Rethrow, _Unwind_Resume_or_Rethrow_nid_postfix);
 GCC_GLOBAL_ALIAS(_Unwind_DeleteException, _Unwind_DeleteException_nid_postfix);
+#if defined(__FreeBSD__)
+// FreeBSD's libc++ builds std::exception_ptr on these libcxxrt entry points. With throw and catch answered here
+// they must be too, or current_exception() would read libcxxrt's state, which nothing updates any more.
+GCC_GLOBAL_ALIAS(__cxa_current_primary_exception, __cxa_current_primary_exception_nid_postfix);
+GCC_GLOBAL_ALIAS(__cxa_rethrow_primary_exception, __cxa_rethrow_primary_exception_nid_postfix);
+GCC_GLOBAL_ALIAS(__cxa_increment_exception_refcount, __cxa_increment_exception_refcount_nid_postfix);
+GCC_GLOBAL_ALIAS(__cxa_decrement_exception_refcount, __cxa_decrement_exception_refcount_nid_postfix);
+#endif
 
 [[noreturn]] void APS5_VABI __cxa_call_unexpected_nid_postfix(void* exception) { __cxa_call_terminate_nid_postfix(exception); }
 

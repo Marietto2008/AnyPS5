@@ -711,7 +711,7 @@ int APS5_VABI sched_getparam_nid_postfix(int pid, KernelSchedParam* param);
 int APS5_VABI sched_getscheduler_nid_postfix(int pid);
 int APS5_VABI sched_setparam_nid_postfix(int pid, const KernelSchedParam* param);
 int APS5_VABI sched_get_priority_min_nid_postfix(int policy);
-int APS5_VABI sysarch(int operation, void* parameters);
+int APS5_VABI sysarch_nid_postfix(int operation, void* parameters);
 int APS5_VABI getrusage_nid_postfix(int who, GuestResourceUsage* usage);
 int APS5_VABI getrlimit_nid_postfix(int resource, GuestResourceLimit* limit);
 int APS5_VABI getpriority_nid_postfix(int which, int who);

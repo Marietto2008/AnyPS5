@@ -10,6 +10,11 @@ add_test_executable(agc_shader_memory_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(agc_shader_memory_tests PRIVATE ${LIBS_INCLUDE_DIR} ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR})
 target_link_libraries(agc_shader_memory_tests PRIVATE shader_recompiler_agc_driver libc)
+# GuestMemory.cpp calls backtrace(), which lives in libexecinfo on FreeBSD.
+find_package(Backtrace)
+if(Backtrace_FOUND AND Backtrace_LIBRARIES)
+    target_link_libraries(agc_shader_memory_tests PRIVATE ${Backtrace_LIBRARIES})
+endif()
 set_target_properties(agc_shader_memory_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_shader_memory_tests)
 

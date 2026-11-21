@@ -126,7 +126,9 @@ void recordChange(void* mutation, const void* pointer, std::size_t bytes) {
     if (mutation != nullptr && bytes != 0) static_cast<MutationState*>(mutation)->changed.emplace_back(reinterpret_cast<std::uintptr_t>(pointer), bytes);
 }
 
-#if !defined(_WIN32) && !defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+// FreeBSD (AnyPS5 port): no userfaultfd, so GuestWriteWatch takes its generic path and the main image
+// needs no anonymous copy (same as Apple); /proc/self/maps and mremap do not exist there either.
+#if !defined(_WIN32) && !defined(__APPLE__) && !defined(__EMSCRIPTEN__) && !defined(__FreeBSD__)
 std::vector<std::pair<std::uintptr_t, std::size_t>> fileBackedWritableImage() {
     const auto image = std::filesystem::read_symlink("/proc/self/exe").string();
     std::ifstream maps("/proc/self/maps");
@@ -337,7 +339,16 @@ void collectMachImagePages(ImagePages& collected) {
 #else
 int collectImagePages(dl_phdr_info* image, std::size_t, void* data) {
     auto& collected = *static_cast<ImagePages*>(data);
-    if (!collected.main && image->dlpi_addr != collected.base) return 0;
+    if (!collected.main) {
+        // The base is where the lowest loadable segment starts: the load bias for a position-independent image, but
+        // not for an executable linked at a fixed address (FreeBSD's default 0x200000), whose bias is 0.
+        std::uintptr_t lowest = UINTPTR_MAX;
+        for (int index = 0; index < image->dlpi_phnum; ++index) {
+            const auto& header = image->dlpi_phdr[index];
+            if (header.p_type == PT_LOAD && header.p_memsz != 0) lowest = std::min<std::uintptr_t>(lowest, (image->dlpi_addr + header.p_vaddr) & ~(collected.pageSize - 1));
+        }
+        if (image->dlpi_addr != collected.base && lowest != collected.base) return 0;
+    }
     collected.found = true;
     for (int index = 0; index < image->dlpi_phnum; ++index) {
         const auto& header = image->dlpi_phdr[index];

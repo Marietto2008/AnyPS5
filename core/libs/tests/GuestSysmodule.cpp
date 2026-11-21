@@ -16,11 +16,17 @@
 #include <windows.h>
 #include <psapi.h>
 #endif
-#ifdef __linux__
+#if defined(__linux__) || defined(__FreeBSD__)
 #include <cstdio>
 #include <fstream>
 #include <sys/mman.h>
 #include <unistd.h>
+#endif
+#if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#include <sys/user.h>
+#include <vector>
 #endif
 #ifdef __APPLE__
 #include <dlfcn.h>
@@ -62,7 +68,7 @@ constexpr std::uint32_t kAgcModuleId = 0x80000094;
 constexpr std::uint32_t kHdrScopesInternalModuleId = 0x800000bd;
 constexpr std::uint32_t kMeasuredInternalUnloadedModuleId = 0x800000c4u;
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__FreeBSD__)
 struct Mapping {
     std::uint64_t start = 0;
     std::uint64_t end = 0;
@@ -70,6 +76,22 @@ struct Mapping {
 };
 
 Mapping MapsEntry(std::uint64_t address) {
+#if defined(__FreeBSD__)
+    // No /proc/self/maps: the kern.proc.vmmap records, read here directly.
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_VMMAP, static_cast<int>(getpid())};
+    std::size_t length = 0;
+    Require(sysctl(mib, 4, nullptr, &length, nullptr, 0) == 0);
+    length += length / 3;
+    std::vector<char> buffer(length);
+    Require(sysctl(mib, 4, buffer.data(), &length, nullptr, 0) == 0);
+    for (std::size_t offset = 0; offset + sizeof(int) <= length;) {
+        const auto* entry = reinterpret_cast<const struct kinfo_vmentry*>(buffer.data() + offset);
+        if (entry->kve_structsize <= 0) break;
+        offset += static_cast<std::size_t>(entry->kve_structsize);
+        if (address >= entry->kve_start && address < entry->kve_end) return Mapping{entry->kve_start, entry->kve_end, std::string(entry->kve_path).substr(0, 4095)};
+    }
+    std::abort();
+#else
     std::ifstream maps("/proc/self/maps");
     std::string line;
     while (std::getline(maps, line)) {
@@ -87,6 +109,7 @@ Mapping MapsEntry(std::uint64_t address) {
         }
     }
     std::abort();
+#endif
 }
 
 void RequireUnwindMatchesMaps(const void* pointer) {

@@ -6,6 +6,11 @@ if(BUILD_TESTING)
     )
     target_include_directories(agc_mapped_copy_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(agc_mapped_copy_tests PRIVATE shader_recompiler_agc_driver libc)
+    # GuestMemory.cpp calls backtrace(), which lives in libexecinfo on FreeBSD.
+    find_package(Backtrace)
+    if(Backtrace_FOUND AND Backtrace_LIBRARIES)
+        target_link_libraries(agc_mapped_copy_tests PRIVATE ${Backtrace_LIBRARIES})
+    endif()
     set_target_properties(agc_mapped_copy_tests PROPERTIES CXX_EXTENSIONS OFF)
     configure_windows_unwind(agc_mapped_copy_tests)
 

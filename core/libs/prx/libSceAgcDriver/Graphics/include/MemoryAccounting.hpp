@@ -34,6 +34,11 @@ public:
     static void ForgetDevice(VkDevice device) noexcept;
     static Snapshot Read(VkDevice device);
     static void Report(const Context& context, const VkPhysicalDeviceMemoryBudgetPropertiesEXT& reported, const StorageTextureBudgetSnapshot& storage) noexcept;
+    // The largest system-memory allocation the driver of this device grants (not imports), UINT64_MAX when unbounded.
+    static VkDeviceSize HostAllocationLimit(VkDevice device) noexcept;
+    // Wraps the device resolver of a driver with known faults (FreeBSD NVIDIA: bounded system-memory allocations, and a
+    // deadlock when the first pipelines compile concurrently); returns the resolver unchanged for other drivers.
+    static PFN_vkGetDeviceProcAddr GuardDriverFaults(VkDevice device, PFN_vkGetDeviceProcAddr resolver, std::uint32_t vendor, const VkPhysicalDeviceMemoryProperties& properties);
 };
 
 }

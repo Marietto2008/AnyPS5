@@ -1,6 +1,6 @@
 target_sources(libSceLibreSsl PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src/Cmac.cpp)
 target_link_libraries(libSceLibreSsl PRIVATE mbedcrypto)
-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
     target_link_options(libSceLibreSsl PRIVATE LINKER:--exclude-libs,ALL)
 endif()
 

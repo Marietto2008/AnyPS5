@@ -13,6 +13,11 @@
 #include <windows.h>
 #elif defined(__APPLE__)
 #include <mach-o/dyld.h>
+#elif defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#include <cerrno>
+#include <climits>
 #endif
 
 namespace HostExecutable {
@@ -49,6 +54,14 @@ inline std::filesystem::path Own(const char* function) {
     if (_NSGetExecutablePath(executable.data(), &size) == 0) own = std::filesystem::canonical(executable.data(), error);
     if (own.empty()) throw std::runtime_error(std::string(function) + ": cannot locate the executable");
     return own;
+#elif defined(__FreeBSD__)
+    // No /proc/self/exe: kern.proc.pathname gives the absolute path of the running executable.
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1};
+    char own[PATH_MAX];
+    std::size_t length = sizeof(own);
+    if (sysctl(mib, 4, own, &length, nullptr, 0) != 0 || length == 0)
+        throw std::system_error(errno, std::generic_category(), std::string(function) + ": cannot read kern.proc.pathname");
+    return std::filesystem::path(own);
 #else
     std::error_code error;
     auto own = std::filesystem::read_symlink("/proc/self/exe", error);
@@ -56,6 +69,28 @@ inline std::filesystem::path Own(const char* function) {
     return own;
 #endif
 }
+
+#if defined(__FreeBSD__)
+// The process arguments, as /proc/self/cmdline gives them on Linux: kern.proc.args, NUL-separated.
+inline std::vector<std::string> Arguments(const char* function) {
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_ARGS, -1};
+    std::size_t length = 0;
+    if (sysctl(mib, 4, nullptr, &length, nullptr, 0) != 0)
+        throw std::system_error(errno, std::generic_category(), std::string(function) + ": cannot read kern.proc.args");
+    std::string all(length, '\0');
+    if (sysctl(mib, 4, all.data(), &length, nullptr, 0) != 0)
+        throw std::system_error(errno, std::generic_category(), std::string(function) + ": cannot read kern.proc.args");
+    all.resize(length);
+    std::vector<std::string> arguments;
+    for (std::size_t begin = 0; begin < all.size();) {
+        const auto end = all.find('\0', begin);
+        arguments.push_back(all.substr(begin, end == std::string::npos ? std::string::npos : end - begin));
+        if (end == std::string::npos) break;
+        begin = end + 1;
+    }
+    return arguments;
+}
+#endif
 
 #ifdef _WIN32
 inline std::wstring Wide(const std::string& text, const char* function) {

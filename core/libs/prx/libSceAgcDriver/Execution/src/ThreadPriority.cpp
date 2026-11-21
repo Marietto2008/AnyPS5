@@ -19,6 +19,11 @@
 #include <pthread.h>
 #include <sys/qos.h>
 #else
+#ifdef __FreeBSD__
+#include <cerrno>
+#include <sys/types.h>
+#include <sys/rtprio.h>
+#endif
 #include <dlfcn.h>
 #include <sched.h>
 #include <sys/resource.h>
@@ -69,6 +74,24 @@ void Raise(const char* role) {
     if (error != 0)
         throw std::runtime_error(std::string("APS5_THREAD_PRIORITY=high: ") + role + " user-interactive QoS refused: " + std::strerror(error));
     LogOnce(role, "user-interactive QoS");
+}
+
+#elif defined(__FreeBSD__)
+
+// FreeBSD: rtprio_thread(2) on the calling thread. "rt" maps APS5_THREAD_RT (1..99, higher is more urgent, as
+// Linux SCHED_FIFO) onto the realtime class RTP_PRIO_MAX..RTP_PRIO_MIN (0 is the most urgent); it needs root or
+// membership of the mac_priority(4) realtime group. "high" has no per-thread equivalent (FreeBSD nice is
+// per process, and raising it would raise the guest threads too), so it is refused with an explanation.
+void Raise(const char* role) {
+    if (RequestedMode() != ThreadPriorityMode::Realtime)
+        throw std::runtime_error(std::string("APS5_THREAD_PRIORITY=high: ") + role + " is not available on FreeBSD (no per-thread nice); use rt");
+    const int priority = std::max(1, std::min(99, EnvInt("APS5_THREAD_RT", 10)));
+    struct rtprio wanted{};
+    wanted.type = RTP_PRIO_REALTIME;
+    wanted.prio = static_cast<u_short>(RTP_PRIO_MAX - (priority - 1) * (RTP_PRIO_MAX - RTP_PRIO_MIN) / 98);
+    if (rtprio_thread(RTP_SET, 0, &wanted) != 0)
+        throw std::runtime_error(std::string("APS5_THREAD_PRIORITY=rt: ") + role + " realtime refused: " + std::strerror(errno));
+    LogOnce(role, "rtprio realtime " + std::to_string(wanted.prio));
 }
 
 #elif !defined(_WIN32)

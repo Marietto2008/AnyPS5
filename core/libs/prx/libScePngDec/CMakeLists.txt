@@ -6,7 +6,7 @@ target_include_directories(libScePngDec PRIVATE ${LIBS_INCLUDE_DIR})
 set_target_properties(libScePngDec PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(libScePngDec)
 target_link_libraries(libScePngDec PRIVATE decoder_png png_backend)
-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
     target_link_options(libScePngDec PRIVATE "LINKER:--exclude-libs,$<TARGET_FILE_NAME:png_backend>")
 endif()
 

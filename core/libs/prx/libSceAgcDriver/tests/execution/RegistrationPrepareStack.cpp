@@ -18,6 +18,7 @@
 #include <windows.h>
 #else
 #include <pthread.h>
+#include "prx/libc/include/specifics/freebsd/Compat.hpp" // pthread_getattr_np on FreeBSD
 #endif
 
 namespace {

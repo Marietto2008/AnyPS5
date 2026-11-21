@@ -33,6 +33,11 @@
 #include <poll.h>
 #include <sys/eventfd.h>
 #include <sys/inotify.h>
+#if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/event.h>
+#include <sys/user.h> // struct kinfo_file for F_KINFO
+#endif
 #include <sys/stat.h>
 #include <unistd.h>
 #include <unordered_map>
@@ -42,7 +47,7 @@ namespace {
 
 constexpr int GUEST_EBADF = 9;
 constexpr int GUEST_EINVAL = 22;
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__) // the system NOTE_* values are the guest's
 static_assert(NOTE_DELETE == 0x0001 && NOTE_WRITE == 0x0002 && NOTE_EXTEND == 0x0004 && NOTE_ATTRIB == 0x0008 &&
     NOTE_LINK == 0x0010 && NOTE_RENAME == 0x0020);
 #else
@@ -518,7 +523,14 @@ std::uint32_t AttributeHint(HostWatch& host) {
     } else if (current.st_nlink < host.last.st_nlink) {
         hint = host.directory && current.st_nlink != 0 ? NOTE_LINK : NOTE_DELETE;
     }
+#if defined(__FreeBSD__)
+    // FreeBSD reports a truncation as IN_ATTRIB then IN_MODIFY: the size stays ModifyHint's to compare.
+    const auto size = host.last.st_size;
     host.last = current;
+    host.last.st_size = size;
+#else
+    host.last = current;
+#endif
     return hint;
 }
 
@@ -580,7 +592,12 @@ bool HasUnpairedMove(const std::vector<HostEvent>& events, std::size_t first) {
 
 int WaitForRenamesInProgress(const HostWatch& host) {
     char entries[1024];
-    if (::getdents64(host.entries, entries, sizeof(entries)) < 0 && errno != ENOENT) {
+#if defined(__FreeBSD__)
+    const auto read = ::getdents(host.entries, entries, sizeof(entries));
+#else
+    const auto read = ::getdents64(host.entries, entries, sizeof(entries));
+#endif
+    if (read < 0 && errno != ENOENT) {
         return errno;
     }
     return 0;
@@ -666,7 +683,16 @@ int OpenHostWatch(int descriptor, std::uint32_t, HostWatch& host) {
         NotImplemented_nid_no_patch("EVFILT_VNODE: a descriptor that is not a file or a directory");
     }
     host.directory = S_ISDIR(status.st_mode);
+#if defined(__FreeBSD__)
+    // No /proc/self/fd: F_KINFO gives the path the descriptor was opened with (inotify watches by path).
+    struct kinfo_file info {};
+    info.kf_structsize = KINFO_FILE_SIZE;
+    if (::fcntl(descriptor, F_KINFO, &info) != 0 || info.kf_path[0] == '\0')
+        throw std::runtime_error("EVFILT_VNODE: the path of the watched descriptor is unknown, errno=" + std::to_string(errno));
+    const std::string path = info.kf_path;
+#else
     const auto path = "/proc/self/fd/" + std::to_string(descriptor);
+#endif
     host.target = ::open(path.c_str(), O_PATH | O_CLOEXEC);
     if (host.target < 0 || ::fstat(host.target, &host.last) != 0) {
         const int error = errno;

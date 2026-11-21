@@ -12,7 +12,7 @@
 #include <linux/if_link.h>
 #include <net/if_arp.h>
 #include <netpacket/packet.h>
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) || defined(__FreeBSD__) // BSD: AF_LINK, sockaddr_dl, if_data
 #include <net/if_dl.h>
 #include <net/if_media.h>
 #include <net/if_types.h>
@@ -88,7 +88,7 @@ std::vector<std::uint8_t> GuestAddress(const sockaddr* address) {
 std::vector<std::uint8_t> GuestNetmask(const sockaddr* netmask, int family) {
     sockaddr_storage mask{};
     const std::size_t size = family == AF_INET ? sizeof(sockaddr_in) : sizeof(sockaddr_in6);
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__) // sa_len
     const std::size_t length = std::min<std::size_t>(netmask->sa_len, size);
 #else
     const std::size_t length = size;
@@ -118,7 +118,7 @@ std::vector<std::uint8_t> BroadcastAddress(const std::vector<std::uint8_t>& addr
     return broadcast;
 }
 
-#if defined(_WIN32) || defined(__linux__) || defined(__APPLE__)
+#if defined(_WIN32) || defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__)
 constexpr std::uint8_t guestLinkFamily = 18;
 constexpr std::size_t guestLinkNameArea = 8 + 16;
 constexpr std::size_t guestLinkMinimum = 54;
@@ -301,7 +301,7 @@ std::vector<std::uint8_t> GuestInterfaceData(const std::string& name, unsigned i
     }
     return data;
 }
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) || defined(__FreeBSD__) // BSD: AF_LINK, sockaddr_dl, if_data
 bool HostLinkActive(const std::string& name, unsigned int hostFlags) {
     const int probe = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (probe < 0) throw std::runtime_error(std::string("getifaddrs: no socket to read the media status of ") + name + ": " + std::strerror(errno));
@@ -320,7 +320,12 @@ std::vector<std::uint8_t> GuestInterfaceData(const std::string& name, unsigned i
     std::vector<std::uint8_t> data(guestInterfaceDataSize, 0);
     data[0] = type;
     data[2] = hardwareLength;
+#if defined(__FreeBSD__)
+    // FreeBSD drivers that carry VLAN tags report the 18-byte tagged header; the guest sees an Ethernet header.
+    data[3] = type == guestTypeEthernet ? 14 : type == guestTypeLoopback ? 0 : host.ifi_hdrlen;
+#else
     data[3] = type == guestTypeLoopback ? 0 : host.ifi_hdrlen;
+#endif
     if (type == guestTypeLoopback) data[4] = (hostFlags & IFF_UP) ? guestLinkStateUp : guestLinkStateDown;
     else data[4] = HostLinkActive(name, hostFlags) ? guestLinkStateUp : guestLinkStateDown;
     Store(data, 6, static_cast<std::uint16_t>(guestInterfaceDataSize));
@@ -385,7 +390,7 @@ int HostEntries(std::vector<Entry>& entries) {
                 owner.linked = true;
                 continue;
             }
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) || defined(__FreeBSD__) // BSD: AF_LINK, sockaddr_dl, if_data
             if (item->ifa_addr->sa_family == AF_LINK) {
                 const auto& link = *reinterpret_cast<const sockaddr_dl*>(item->ifa_addr);
                 HostInterface& owner = interfaceFor(CheckedName(item->ifa_name));

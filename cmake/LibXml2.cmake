@@ -61,7 +61,7 @@ function(add_bundled_libxml2)
         C_VISIBILITY_PRESET hidden
     )
     target_compile_definitions(LibXml2 PUBLIC LIBXML_STATIC)
-    if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
         target_link_options(LibXml2 INTERFACE LINKER:--exclude-libs,libxml2.a)
     endif()
 endfunction()

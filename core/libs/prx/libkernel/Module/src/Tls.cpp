@@ -19,7 +19,7 @@ constexpr std::size_t ThreadLocalStoragePointerOffset = 0x58;
 
 }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
 extern "C" void* __tls_get_addr(void* index);
 #endif
 
@@ -32,7 +32,8 @@ void* APS5_VABI __tls_get_addr_nid_postfix(const KernelTlsIndex* index) {
     auto* blocks = *reinterpret_cast<char***>(reinterpret_cast<char*>(NtCurrentTeb()) + ThreadLocalStoragePointerOffset);
     if (blocks == nullptr || blocks[slot] == nullptr) throw std::logic_error("__tls_get_addr: thread has no TLS block for the module");
     return blocks[slot] + index->offset;
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__FreeBSD__)
+    // FreeBSD's rtld exports __tls_get_addr with the same {module, offset} index.
     KernelTlsIndex host = *index;
     return __tls_get_addr(&host);
 #else

@@ -10,13 +10,14 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
-#elif defined(__linux__) || defined(__APPLE__) || defined(__EMSCRIPTEN__)
+#elif defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__) || defined(__EMSCRIPTEN__)
 #include "prx/libc/include/specifics/linux/ElfTypes.hpp"
+#include "prx/libc/include/specifics/linux/MainProgram.hpp"
 #include <dlfcn.h>
 #endif
 
 bool ApplicationGuestHeapApi_nid_no_patch(void** api) {
-#ifdef __linux__
+#if defined(__linux__) || defined(__FreeBSD__)
     static const auto guest = [] {
         constexpr std::array<const char*, 10> names{
             "gQX+4GDQjpM#guest", "tIhsqj0qsFE#guest", "2X5agFjKxMc#guest", "Y7aJ1uydPMo#guest",
@@ -88,14 +89,14 @@ const void* ApplicationProcessParameters_nid_no_patch() {
     }
     if (!found) throw std::runtime_error("application heap: process metadata is missing; relink the executable");
     return result;
-#elif defined(__linux__) || defined(__APPLE__) || defined(__EMSCRIPTEN__)
+#elif defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__) || defined(__EMSCRIPTEN__)
     struct Search {
         const void* parameters = nullptr;
         bool invalid = false;
     } search;
     dl_iterate_phdr([](dl_phdr_info* image, std::size_t, void* data) {
         auto& result = *static_cast<Search*>(data);
-        if (image->dlpi_name != nullptr && image->dlpi_name[0] != '\0') return 0;
+        if (!MainProgramImage(*image)) return 0;
         for (std::uint16_t index = 0; index < image->dlpi_phnum; ++index) {
             const auto& header = image->dlpi_phdr[index];
             if (header.p_type != 0x61000001) continue;

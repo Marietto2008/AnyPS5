@@ -12,6 +12,8 @@
 #include <vector>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/specifics/freebsd/Compat.hpp"
+#include "prx/libc/include/specifics/linux/MainProgram.hpp"
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
 #include "prx/libkernel/Module/EhFrame.hpp"
@@ -325,7 +327,7 @@ int FindImage(dl_phdr_info* image, std::size_t, void* data) {
 
 int CollectGuestImage(dl_phdr_info* image, std::size_t, void* data) {
     const std::string_view name = image->dlpi_name ? image->dlpi_name : "";
-    if (!name.empty() && !name.ends_with(".prx")) return 0;
+    if (!MainProgramImage(*image) && !name.ends_with(".prx")) return 0;
     for (std::uint16_t i = 0; i < image->dlpi_phnum; ++i) {
         const auto& header = image->dlpi_phdr[i];
         if (header.p_type != PT_LOAD) continue;
@@ -351,7 +353,7 @@ std::vector<GuestImage> GuestImages() {
 
 int AddGuestSegmentBytes(dl_phdr_info* image, std::size_t, void* data) {
     const std::string_view name = image->dlpi_name ? image->dlpi_name : "";
-    if (!name.empty() && !name.ends_with(GuestModuleSuffix)) return 0;
+    if (!MainProgramImage(*image) && !name.ends_with(GuestModuleSuffix)) return 0;
     constexpr auto allAccess = PF_R | PF_W | PF_X;
     for (std::uint16_t i = 0; i < image->dlpi_phnum; ++i) {
         const auto& header = image->dlpi_phdr[i];
@@ -368,9 +370,9 @@ std::uint64_t GuestSegmentBytes() {
 }
 
 bool SystemImage(const GuestImage& image) {
-    const auto* name = static_cast<const link_map*>(image.native)->l_name;
-    const std::string_view path = name ? name : "";
-    return !path.empty() && !path.ends_with(GuestModuleSuffix);
+    const auto* map = static_cast<const link_map*>(image.native);
+    const std::string_view path = map->l_name ? map->l_name : "";
+    return !MainProgramMap(*map) && !path.ends_with(GuestModuleSuffix);
 }
 #else
 bool SectionNamed(const IMAGE_SECTION_HEADER& section, const char* name) {

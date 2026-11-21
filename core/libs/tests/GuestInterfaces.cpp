@@ -12,7 +12,7 @@
 #ifdef __linux__
 #include <net/if_arp.h>
 #include <netpacket/packet.h>
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) || defined(__FreeBSD__)
 #include <net/if_dl.h>
 #include <net/if_types.h>
 #endif
@@ -77,7 +77,7 @@ static std::uint64_t SysfsCounter(const char* name, const char* file) {
     Require(static_cast<bool>(input >> value));
     return value;
 }
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) || defined(__FreeBSD__)
 constexpr int HostLinkFamily = AF_LINK;
 
 static std::uint64_t SysfsCounter(const char* name, const char* file) {
@@ -98,7 +98,7 @@ static std::uint64_t SysfsCounter(const char* name, const char* file) {
 }
 #endif
 
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
 
 static std::uint32_t HostMtu(const char* name) {
     const int probe = ::socket(AF_INET, SOCK_DGRAM, 0);
@@ -322,7 +322,7 @@ static std::vector<HostInterfaceAddress> HostSnapshot() {
                 members.insert(members.begin(), entry);
                 continue;
             }
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) || defined(__FreeBSD__)
             if (item->ifa_addr->sa_family == AF_LINK) {
                 const auto& link = *reinterpret_cast<const sockaddr_dl*>(item->ifa_addr);
                 HostInterfaceAddress entry{};
@@ -368,7 +368,7 @@ int main() {
     const std::uint8_t loopbackAddress[] = {127, 0, 0, 1};
     const std::uint8_t loopbackMask[] = {255, 0, 0, 0};
     bool matched = false;
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
     bool linkChecked = false;
     SendLoopbackDatagram();
 #endif
@@ -391,7 +391,7 @@ int main() {
             Require((item->flags & ~knownFlags) == 0);
             const auto* address = static_cast<const std::uint8_t*>(item->address);
             Require(address != nullptr && reinterpret_cast<std::uintptr_t>(address) % 8 == 0);
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
             if (address[1] == 18) {
                 Require(item->netmask == nullptr && item->destination == nullptr);
                 const auto* data = static_cast<const std::uint8_t*>(item->data);
@@ -476,7 +476,7 @@ int main() {
 
     }
     Require(matched);
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
     Require(linkChecked);
 #endif
     GuestInterfaceAddress* released = nullptr;

@@ -103,7 +103,13 @@ void RequireMappedLabelsRefused(AgcDriver::VulkanDevice& device) {
     Require(shared != MAP_FAILED, "unregistered label: cannot map shared anonymous memory");
     const int sharedReason = StoreLabel(device, AddressOf(shared) + 8, 0x5a5a0006u, 6);
     munmap(shared, BlockBytes);
+#if defined(__FreeBSD__)
+    // kern.proc.vmmap cannot tell a shared anonymous mapping from a private one, and the FreeBSD NVIDIA driver
+    // imports shared anonymous pages as it does private ones: the label is written in place.
+    RequireReason(sharedReason, 0, "a label in a shared anonymous mapping");
+#else
     RequireReason(sharedReason, 3, "a label in a shared anonymous mapping");
+#endif
 #endif
 }
 

@@ -37,6 +37,9 @@
 #include <sys/uio.h>
 #include "prx/libc/include/specifics/linux/GuestFaultCopy.hpp"
 #include "prx/libc/include/specifics/linux/HostMapping.hpp"
+#elif defined(__FreeBSD__)
+#include "prx/libc/include/specifics/linux/GuestFaultCopy.hpp"
+#include "prx/libc/include/specifics/linux/HostMapping.hpp"
 #elif defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
@@ -110,6 +113,18 @@ bool CopyGuestBytes(void* destination, const void* source, std::size_t bytes, bo
     if (copied < 0 && errno != EFAULT) throw std::runtime_error("guest path: process_vm_readv failed with errno " + std::to_string(errno));
     errno = saved;
     return copied >= 0 && static_cast<std::size_t>(copied) == bytes;
+#elif defined(__FreeBSD__)
+    // No process_vm_readv on FreeBSD: the fault-catching copy, or with it disabled a check of the mappings.
+    if (GuestFaultCopy::Ready()) return GuestFaultCopy::Copy(destination, source, bytes);
+    const auto start = reinterpret_cast<std::uintptr_t>(source);
+    if (bytes > UINTPTR_MAX - start) return false;
+    for (auto address = start; address < start + bytes;) {
+        const auto mapping = HostMapping::Find(address, "guest path");
+        if (!mapping || !mapping->readable) return false;
+        address = mapping->end;
+    }
+    std::memcpy(destination, source, bytes);
+    return true;
 #elif defined(__APPLE__)
     mach_vm_size_t copied = 0;
     return mach_vm_read_overwrite(mach_task_self(), reinterpret_cast<mach_vm_address_t>(source), bytes,
@@ -856,6 +871,17 @@ extern "C" bool GuestWritable_nid_no_patch(void* destination, std::size_t bytes)
             (memory.Protect & PAGE_GUARD) != 0 ||
             (memory.Protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) == 0) return false;
         address = reinterpret_cast<std::uintptr_t>(memory.BaseAddress) + memory.RegionSize;
+#elif defined(__FreeBSD__)
+        // FreeBSD has no per-address map query (kern.proc.vmmap copies the whole map, and the guest asks per character):
+        // a store that changes nothing tells, page by page.
+        if (GuestFaultCopy::Ready()) {
+            if (!GuestFaultCopy::ProbeWrite(reinterpret_cast<void*>(address))) return false;
+            address = (address | (static_cast<std::uintptr_t>(getpagesize()) - 1)) + 1;
+            continue;
+        }
+        const auto mapping = HostMapping::Find(address, "GuestWritable");
+        if (!mapping || !mapping->writable) return false;
+        address = mapping->end;
 #elif defined(__linux__)
         const auto mapping = HostMapping::Find(address, "GuestWritable");
         if (!mapping || !mapping->writable) return false;
@@ -912,6 +938,12 @@ extern "C" bool GuestCopyOut_nid_no_patch(void* destination, const void* source,
         throw std::runtime_error("GuestCopyOut: process_vm_writev failed with errno " + std::to_string(errno));
     }
     return static_cast<std::size_t>(copied) == bytes;
+#elif defined(__FreeBSD__)
+    // No process_vm_writev: the fault-catching copy, or with it disabled a check of the mappings.
+    if (GuestFaultCopy::Ready()) return GuestFaultCopy::Copy(destination, source, bytes);
+    if (!GuestWritable_nid_no_patch(destination, bytes)) return false;
+    std::memcpy(destination, source, bytes);
+    return true;
 #elif defined(__APPLE__)
     return ::mach_vm_write(::mach_task_self(), reinterpret_cast<mach_vm_address_t>(destination),
         reinterpret_cast<vm_offset_t>(source), static_cast<mach_msg_type_number_t>(bytes)) == KERN_SUCCESS;
@@ -982,7 +1014,7 @@ extern "C" bool GuestCopyOutRows_nid_no_patch(void* destination, std::size_t des
 }
 
 extern "C" void GuestFaultCopyReinstall_nid_no_patch() {
-#if defined(__linux__) && defined(__x86_64__)
+#if (defined(__linux__) || defined(__FreeBSD__)) && defined(__x86_64__)
     GuestFaultCopy::Reinstall();
 #endif
 }

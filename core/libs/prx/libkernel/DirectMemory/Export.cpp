@@ -27,6 +27,8 @@
 #ifdef __APPLE__
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#elif defined(__FreeBSD__)
+#include "prx/libc/include/specifics/linux/HostMapping.hpp"
 #endif
 #endif
 #include <algorithm>
@@ -521,6 +523,26 @@ static int QueryVirtualRange(const void* addr, int flags, VirtualQueryInfo* info
  }
  const bool writable = watched >= 0 ? (watched & PROT_WRITE) != 0 : (host.protection & VM_PROT_WRITE) != 0;
  const bool executable = (host.protection & VM_PROT_EXECUTE) != 0;
+ #elif defined(__FreeBSD__)
+ // No /proc/self/maps: the host mapping from kern.proc.vmmap, and the write watch's protection where it watches.
+ const auto host = HostMapping::Find(address, "sceKernelVirtualQuery");
+ if (!host || !host->readable) return SCE_KERNEL_ERROR_EACCES;
+ info->start = host->start;
+ info->end = host->end;
+ int watched = -1;
+ for (std::uintptr_t cursor = info->start; cursor < info->end;) {
+  std::uintptr_t runEnd = info->end;
+  const int protection = GuestWriteWatch::GuestWriteWatchProtection_nid_postfix(cursor, info->end, &runEnd);
+  if (address < runEnd) {
+   info->start = cursor;
+   info->end = runEnd;
+   watched = protection;
+   break;
+  }
+  cursor = runEnd;
+ }
+ const bool writable = watched >= 0 ? (watched & PROT_WRITE) != 0 : host->writable;
+ const bool executable = host->executable;
  #else
  std::ifstream maps("/proc/self/maps");
  std::string line;

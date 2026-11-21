@@ -1,4 +1,5 @@
 #include "SceTypes.hpp"
+#include "prx/libc/include/HostExecutable.hpp"
 #include "prx/libc/include/Api.hpp"
 #include "prx/libc/include/general/AsmMacros.hpp"
 #include "prx/libc/include/GuestWriteWatch.hpp"
@@ -557,7 +558,12 @@ static void TestRemoveAndReturn(const char* self) {
     std::string argument = RemoveAndReturnMode;
     char* arguments[] = {program.data(), argument.data(), nullptr};
     pid_t child = 0;
-    Require(posix_spawn(&child, "/proc/self/exe", &actions, nullptr, arguments, environ) == 0);
+#if defined(__FreeBSD__)
+    const std::string selfPath = HostExecutable::Own("test").string();   // no /proc/self/exe
+#else
+    const std::string selfPath = "/proc/self/exe";
+#endif
+    Require(posix_spawn(&child, selfPath.c_str(), &actions, nullptr, arguments, environ) == 0);
     posix_spawn_file_actions_destroy(&actions);
     close(pipeEnds[1]);
     int status = 0;

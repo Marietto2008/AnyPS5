@@ -74,6 +74,7 @@
 #else
 #include <fcntl.h>
 #include <sys/mman.h>
+#include "prx/libc/include/specifics/freebsd/LinuxMmapFlags.hpp"
 #include <unistd.h>
 #endif
 #include <functional>

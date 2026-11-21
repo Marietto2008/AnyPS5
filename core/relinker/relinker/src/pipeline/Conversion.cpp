@@ -1,6 +1,7 @@
 #include <domain/Types.hpp>
 #include <io/NativePath.hpp>
 #include <elfpatcher/linux/LinuxElfPatcher.hpp>
+#include <elfpatcher/linux/LinuxOutputFlavor.hpp>
 #include <elfpatcher/general/SegmentFilter.hpp>
 #include <elfpatcher/general/EntryStubBuilder.hpp>
 #include <elfpatcher/general/ProgramHeaderLayoutBuilder.hpp>
@@ -104,7 +105,7 @@ ConversionOutput Conversion::Convert(ConversionInput input, const ConversionOpti
         options.UnusedFilterLevel, inputProgress, options.FunctionSymbolRoots
     );
 
-    { std::ostringstream message; message << "System: " << (windows ? "Windows" : macos ? "macOS" : "Linux") << "; unused-filter=" << options.UnusedFilterLevel << "\n"; inputProgress.Message(message.str()); }
+    { std::ostringstream message; message << "System: " << (windows ? "Windows" : macos ? "macOS" : Elfpatcher::Linux::FreeBsdOutput() ? "FreeBSD" : "Linux") << "; unused-filter=" << options.UnusedFilterLevel << "\n"; inputProgress.Message(message.str()); }
     for (const auto& name : options.ExcludedModules) { std::ostringstream message; message << "Guest module excluded: " << name << '\n'; inputProgress.Message(message.str()); }
     auto result = pipeline->Relink();
     sourceBytes = elfReader->TakeBytes();

@@ -214,7 +214,7 @@ void PreparePixelFunctionLds(const Context& context, VkCommandBuffer commands, s
     Require(pool.bufferLayout != VK_NULL_HANDLE, "pixel function LDS descriptor set layout was not created");
     if (pool.buffer == VK_NULL_HANDLE) {
         const auto stride = static_cast<std::uint64_t>(subgroupSize) * ShaderRecompiler::FunctionLdsDwordLimit * 4ull;
-        const auto budget = std::min<std::uint64_t>(context.limits.maxStorageBufferRange, 2ull << 30);
+        const auto budget = std::min({std::uint64_t{context.limits.maxStorageBufferRange}, std::uint64_t{2ull << 30}, std::uint64_t{MemoryAccounting::HostAllocationLimit(context.device)}});
         Require(budget > 16ull + stride, "pixel function LDS does not fit in the device storage buffer range");
         pool.slots = static_cast<std::uint32_t>((budget - 16ull) / stride);
         pool.subgroupSize = subgroupSize;

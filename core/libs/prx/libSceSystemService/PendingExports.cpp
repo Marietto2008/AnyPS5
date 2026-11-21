@@ -859,8 +859,8 @@ std::uint64_t APS5_VABI sceShellCoreUtilGetFreeSizeOfAvContentsTmp() {
 }
 
 int APS5_VABI sceShellCoreUtilGetFreeSizeOfUserPartition(std::uint64_t* freeSize, std::uint64_t* totalSize) {
+    const int savedErrno = errno; // before HostSpace: FreeBSD's std::filesystem::space changes errno even when it succeeds
     const std::filesystem::space_info space = HostSpace();
-    const int savedErrno = errno;
     if (freeSize != nullptr) {
         const std::uint64_t localFree = space.available;
         if (!GuestCopyOut_nid_no_patch(freeSize, &localFree, sizeof(localFree))) {

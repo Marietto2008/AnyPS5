@@ -1,4 +1,5 @@
 #include "prx/libc/include/Api.hpp"
+#include "prx/libc/include/HostExecutable.hpp"
 #include "prx/libSceSystemService/include/SystemService.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libc/include/Shutdown.hpp"
@@ -96,6 +97,8 @@ std::filesystem::path OwnExecutable() {
     std::vector<char> executable(size);
     Require(_NSGetExecutablePath(executable.data(), &size) == 0);
     return std::filesystem::canonical(executable.data());
+#elif defined(__FreeBSD__)
+    return HostExecutable::Own("test");   // no /proc/self/exe
 #else
     return std::filesystem::read_symlink("/proc/self/exe");
 #endif

@@ -26,7 +26,7 @@
 #else
 #include <spawn.h>
 #endif
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
 #include <unistd.h>
 #elif defined(__APPLE__)
 #include <crt_externs.h>
@@ -34,7 +34,7 @@
 #include <unistd.h>
 #endif
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
 extern char** environ;
 #endif
 
@@ -400,7 +400,7 @@ int SpawnChild(const char* function, const std::string& guest, PosixSpawnFileAct
         }
     if (result == 0) {
         char* const* hostEnvironment = environment;
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
         if (hostEnvironment == nullptr) hostEnvironment = environ;
 #elif defined(__APPLE__)
         if (hostEnvironment == nullptr) hostEnvironment = *_NSGetEnviron();
