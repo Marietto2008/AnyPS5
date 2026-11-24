@@ -2,7 +2,7 @@
 
 # About
 
-Tool for automatic executables porting to Linux and Windows.
+Tool for automatic executables ported for FreeBSD.
 
 The relinker-only build runs on macOS, including Apple silicon.
 
